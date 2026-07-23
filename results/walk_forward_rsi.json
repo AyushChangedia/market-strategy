@@ -1,0 +1,58 @@
+{
+  "symbol": "^NSEBANK",
+  "strategy": "rsi",
+  "label": "RSI Oversold/Overbought",
+  "period": "2y",
+  "interval": "1d",
+  "total_candles": 495,
+  "n_splits": 3,
+  "train_ratio": 0.7,
+  "date_from": "2024-07-23",
+  "date_to": "2026-07-23",
+  "avg_train_return_pct": 3.73,
+  "avg_test_return_pct": 1.04,
+  "robustness_score": 0.46,
+  "verdict": "WEAK - significant out-of-sample degradation, likely overfitted",
+  "oos_total_trades": 1,
+  "oos_total_return_pct": 3.11,
+  "buy_and_hold_return_pct": 9.3,
+  "folds": [
+    {
+      "fold": 1,
+      "train_from": "2024-07-23",
+      "train_to": "2025-01-06",
+      "train_return_pct": 8.18,
+      "train_trades": 2,
+      "test_from": "2025-01-07",
+      "test_to": "2025-03-19",
+      "test_return_pct": 3.11,
+      "test_trades": 1,
+      "fold_robustness_score": 0.38
+    },
+    {
+      "fold": 2,
+      "train_from": "2025-03-20",
+      "train_to": "2025-09-05",
+      "train_return_pct": 0.0,
+      "train_trades": 0,
+      "test_from": "2025-09-08",
+      "test_to": "2025-11-19",
+      "test_return_pct": 0.0,
+      "test_trades": 0,
+      "fold_robustness_score": 1.0
+    },
+    {
+      "fold": 3,
+      "train_from": "2025-11-20",
+      "train_to": "2026-05-12",
+      "train_return_pct": 3.01,
+      "train_trades": 1,
+      "test_from": "2026-05-13",
+      "test_to": "2026-07-23",
+      "test_return_pct": 0.0,
+      "test_trades": 0,
+      "fold_robustness_score": 0.0
+    }
+  ],
+  "disclaimer": "Past performance does not guarantee future results. Educational use only."
+}

@@ -1,0 +1,90 @@
+{
+  "symbol": "^NSEBANK",
+  "instrument": "Bank Nifty Index",
+  "period": "2y",
+  "interval": "1d",
+  "candles_analyzed": 495,
+  "date_from": "2024-07-23",
+  "date_to": "2026-07-23",
+  "initial_capital": 1000000.0,
+  "commission_pct": 0.1,
+  "slippage_pct": 0.05,
+  "buy_and_hold_return_pct": 9.3,
+  "ranking": [
+    {
+      "rank": 1,
+      "strategy": "rsi",
+      "label": "RSI Oversold/Overbought",
+      "total_return_pct": 5.35,
+      "win_rate_pct": 50.0,
+      "total_trades": 6,
+      "profit_factor": 1.91,
+      "sharpe_ratio": 4.1,
+      "max_drawdown_pct": -3.6,
+      "expectancy_pct": 0.92
+    },
+    {
+      "rank": 2,
+      "strategy": "macd",
+      "label": "MACD Crossover",
+      "total_return_pct": 4.95,
+      "win_rate_pct": 33.3,
+      "total_trades": 18,
+      "profit_factor": 1.39,
+      "sharpe_ratio": 1.83,
+      "max_drawdown_pct": -5.55,
+      "expectancy_pct": 0.3
+    },
+    {
+      "rank": 3,
+      "strategy": "ema_cross",
+      "label": "EMA 20/50 Golden/Death Cross",
+      "total_return_pct": 4.39,
+      "win_rate_pct": 33.3,
+      "total_trades": 3,
+      "profit_factor": 2.75,
+      "sharpe_ratio": 4.78,
+      "max_drawdown_pct": -2.32,
+      "expectancy_pct": 1.52
+    },
+    {
+      "rank": 4,
+      "strategy": "donchian",
+      "label": "Donchian Channel Breakout",
+      "total_return_pct": 0.0,
+      "win_rate_pct": 0.0,
+      "total_trades": 0,
+      "profit_factor": 0.0,
+      "sharpe_ratio": 0.0,
+      "max_drawdown_pct": 0.0,
+      "expectancy_pct": 0.0,
+      "note": "Breakout condition never triggered over this period."
+    },
+    {
+      "rank": 5,
+      "strategy": "bollinger",
+      "label": "Bollinger Band Mean Reversion",
+      "total_return_pct": -1.07,
+      "win_rate_pct": 57.1,
+      "total_trades": 7,
+      "profit_factor": 0.92,
+      "sharpe_ratio": -0.57,
+      "max_drawdown_pct": -7.53,
+      "expectancy_pct": -0.1,
+      "note": "Highest win rate of any strategy tested, and still lost money."
+    },
+    {
+      "rank": 6,
+      "strategy": "supertrend",
+      "label": "Supertrend (ATR-based Trend Following)",
+      "total_return_pct": -3.24,
+      "win_rate_pct": 25.0,
+      "total_trades": 8,
+      "profit_factor": 0.88,
+      "sharpe_ratio": -0.84,
+      "max_drawdown_pct": -8.89,
+      "expectancy_pct": -0.28
+    }
+  ],
+  "disclaimer": "Past performance does not guarantee future results. Educational use only."
+}
