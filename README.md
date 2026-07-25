@@ -113,7 +113,7 @@ on Bank Nifty futures but landed here, backtested over six months:
 | **Net profit** | **₹31,632** |
 | Max drawdown | ₹96,894 |
 
-It looked like it worked. A 56.7% win rate reads well, and the net was positive.
+It looked like it worked. A 56.7% win rate reads well, and the net profit was positive.
 
 Two things were wrong. **Commission came to more than twice the net profit** —
 the strategy was, in effect, being run for the broker. And **max drawdown was
