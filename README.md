@@ -102,7 +102,7 @@ Any conclusion drawn from it would be storytelling.
 ## Why the metrics here are the ones they are
 
 This project started somewhere else — an intraday opening-range-breakout system
-on Bank Nifty futures, backtested over six months:
+on Bank Nifty futures but landed here, backtested over six months:
 
 | | |
 |---|---:|
