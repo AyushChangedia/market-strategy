@@ -115,7 +115,7 @@ on Bank Nifty futures but landed here, backtested over six months:
 
 It looked like it worked. A 56.7% win rate reads well, and the net profit was positive.
 
-Two things were wrong. **Commission came to more than twice the net profit** —
+Two things that were wrong. **Commission came to more than twice the net profit** —
 the strategy was, in effect, being run for the broker. And **max drawdown was
 three times the final profit**, so trading it would have meant sitting through
 losses far larger than anything it ever made.
