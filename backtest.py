@@ -61,8 +61,15 @@ def rsi_signals(df: pd.DataFrame, period: int = 14,
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
+
+    # A window with no down-closes has no average loss to divide by. RSI is
+    # defined as 100 there — maximally overbought — but mapping the zero to NaN
+    # made it undefined instead, so the overbought exit never fired during the
+    # strongest part of a rally. A flat window (no gains either) is 50.
     rs = gain / loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.mask((loss == 0) & (gain > 0), 100.0)
+    rsi = rsi.mask((loss == 0) & (gain == 0), 50.0)
 
     position, holding = [], 0
     for value in rsi:
