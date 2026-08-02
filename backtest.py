@@ -74,7 +74,7 @@ def rsi_signals(df: pd.DataFrame, period: int = 14,
     position, holding = [], 0
     for value in rsi:
         if np.isnan(value):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and value < low:
             holding = 1
@@ -108,7 +108,7 @@ def donchian_signals(df: pd.DataFrame, entry: int = 20, exit_: int = 10) -> pd.S
     position, holding = [], 0
     for close, up, down in zip(df["Close"], upper, lower):
         if np.isnan(up) or np.isnan(down):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and close > up:
             holding = 1
@@ -127,7 +127,7 @@ def bollinger_signals(df: pd.DataFrame, period: int = 20, sd: float = 2.0) -> pd
     position, holding = [], 0
     for close, low_band, middle in zip(df["Close"], lower, mid):
         if np.isnan(low_band):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and close < low_band:
             holding = 1
@@ -153,7 +153,7 @@ def supertrend_signals(df: pd.DataFrame, period: int = 10,
     position, holding = [], 0
     for close, up, down in zip(df["Close"], upper, lower):
         if np.isnan(up):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and close > up:
             holding = 1
