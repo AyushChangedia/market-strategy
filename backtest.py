@@ -20,7 +20,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 COMMISSION_PCT = 0.001   # 0.1% per trade
 SLIPPAGE_PCT = 0.0005    # 0.05% per trade
@@ -43,6 +42,10 @@ class Result:
 
 def load_prices(symbol: str, period: str) -> pd.DataFrame:
     """Fetch daily OHLCV. Fails loudly rather than silently returning junk."""
+    # Imported here so the signal and evaluation functions — which are pure and
+    # touch no network — can be imported and tested without yfinance installed.
+    import yfinance as yf
+
     df = yf.download(symbol, period=period, interval="1d",
                      auto_adjust=True, progress=False)
     if df.empty:
@@ -59,21 +62,33 @@ def load_prices(symbol: str, period: str) -> pd.DataFrame:
 # Long-only, one position at a time, evaluated on the close.
 # ---------------------------------------------------------------------------
 
-def rsi_signals(df: pd.DataFrame, period: int = 14,
-                low: int = 30, high: int = 70) -> pd.Series:
-    """Buy oversold, sell overbought. Classic mean reversion."""
-    delta = df["Close"].diff()
+def rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    RSI over a close series, defined at both extremes.
+
+    A window with no down-closes has no average loss to divide by. RSI is 100
+    there — maximally overbought — but mapping the zero to NaN left it
+    undefined instead, so the overbought exit never fired during the strongest
+    part of a rally. A window with no movement at all is 50.
+
+    Split out from rsi_signals so the indicator can be asserted on directly;
+    the position series it feeds is integral and cannot express "undefined".
+    """
+    delta = close.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
 
-    # A window with no down-closes has no average loss to divide by. RSI is
-    # defined as 100 there — maximally overbought — but mapping the zero to NaN
-    # made it undefined instead, so the overbought exit never fired during the
-    # strongest part of a rally. A flat window (no gains either) is 50.
     rs = gain / loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.mask((loss == 0) & (gain > 0), 100.0)
     rsi = rsi.mask((loss == 0) & (gain == 0), 50.0)
+    return rsi
+
+
+def rsi_signals(df: pd.DataFrame, period: int = 14,
+                low: int = 30, high: int = 70) -> pd.Series:
+    """Buy oversold, sell overbought. Classic mean reversion."""
+    rsi = rsi_series(df["Close"], period)
 
     position, holding = [], 0
     for value in rsi:
