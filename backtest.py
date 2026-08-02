@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 from dataclasses import dataclass, asdict
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -32,7 +33,10 @@ class Result:
     total_return_pct: float
     win_rate_pct: float
     total_trades: int
-    profit_factor: float
+    # None when there are no losing trades to divide by — an undefined ratio,
+    # not an infinite one. float("inf") serialises as the bare token Infinity,
+    # which json.dump emits happily but strict JSON parsers reject.
+    profit_factor: Optional[float]
     max_drawdown_pct: float
     expectancy_pct: float
 
@@ -212,7 +216,7 @@ def evaluate(name: str, trades: list) -> Result:
 
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
 
     equity = np.cumprod(1 + arr)
     peak = np.maximum.accumulate(equity)
@@ -223,7 +227,7 @@ def evaluate(name: str, trades: list) -> Result:
         total_return_pct=round((equity[-1] - 1) * 100, 2),
         win_rate_pct=round(len(wins) / len(arr) * 100, 1),
         total_trades=len(arr),
-        profit_factor=round(profit_factor, 2),
+        profit_factor=None if profit_factor is None else round(profit_factor, 2),
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
     )
@@ -259,8 +263,9 @@ def main() -> None:
     print(header)
     print("-" * len(header))
     for r in results:
+        pf = "—" if r.profit_factor is None else f"{r.profit_factor}"
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
-              f"{r.win_rate_pct:>8}{r.profit_factor:>7}{r.max_drawdown_pct:>8}%")
+              f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
 
     beat = [r.strategy for r in results if r.total_return_pct > benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
@@ -272,7 +277,7 @@ def main() -> None:
             "candles": len(df),
             "buy_and_hold_return_pct": benchmark,
             "results": [asdict(r) for r in results],
-        }, f, indent=2)
+        }, f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 
 
