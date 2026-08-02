@@ -16,10 +16,10 @@ Usage:
 import argparse
 import json
 from dataclasses import dataclass, asdict
+from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 COMMISSION_PCT = 0.001   # 0.1% per trade
 SLIPPAGE_PCT = 0.0005    # 0.05% per trade
@@ -32,13 +32,20 @@ class Result:
     total_return_pct: float
     win_rate_pct: float
     total_trades: int
-    profit_factor: float
+    # None when there are no losing trades to divide by — an undefined ratio,
+    # not an infinite one. float("inf") serialises as the bare token Infinity,
+    # which json.dump emits happily but strict JSON parsers reject.
+    profit_factor: Optional[float]
     max_drawdown_pct: float
     expectancy_pct: float
 
 
 def load_prices(symbol: str, period: str) -> pd.DataFrame:
     """Fetch daily OHLCV. Fails loudly rather than silently returning junk."""
+    # Imported here so the signal and evaluation functions — which are pure and
+    # touch no network — can be imported and tested without yfinance installed.
+    import yfinance as yf
+
     df = yf.download(symbol, period=period, interval="1d",
                      auto_adjust=True, progress=False)
     if df.empty:
@@ -55,19 +62,38 @@ def load_prices(symbol: str, period: str) -> pd.DataFrame:
 # Long-only, one position at a time, evaluated on the close.
 # ---------------------------------------------------------------------------
 
+def rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    RSI over a close series, defined at both extremes.
+
+    A window with no down-closes has no average loss to divide by. RSI is 100
+    there — maximally overbought — but mapping the zero to NaN left it
+    undefined instead, so the overbought exit never fired during the strongest
+    part of a rally. A window with no movement at all is 50.
+
+    Split out from rsi_signals so the indicator can be asserted on directly;
+    the position series it feeds is integral and cannot express "undefined".
+    """
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.mask((loss == 0) & (gain > 0), 100.0)
+    rsi = rsi.mask((loss == 0) & (gain == 0), 50.0)
+    return rsi
+
+
 def rsi_signals(df: pd.DataFrame, period: int = 14,
                 low: int = 30, high: int = 70) -> pd.Series:
     """Buy oversold, sell overbought. Classic mean reversion."""
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi_series(df["Close"], period)
 
     position, holding = [], 0
     for value in rsi:
         if np.isnan(value):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and value < low:
             holding = 1
@@ -101,7 +127,7 @@ def donchian_signals(df: pd.DataFrame, entry: int = 20, exit_: int = 10) -> pd.S
     position, holding = [], 0
     for close, up, down in zip(df["Close"], upper, lower):
         if np.isnan(up) or np.isnan(down):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and close > up:
             holding = 1
@@ -120,7 +146,7 @@ def bollinger_signals(df: pd.DataFrame, period: int = 20, sd: float = 2.0) -> pd
     position, holding = [], 0
     for close, low_band, middle in zip(df["Close"], lower, mid):
         if np.isnan(low_band):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and close < low_band:
             holding = 1
@@ -146,7 +172,7 @@ def supertrend_signals(df: pd.DataFrame, period: int = 10,
     position, holding = [], 0
     for close, up, down in zip(df["Close"], upper, lower):
         if np.isnan(up):
-            position.append(0)
+            position.append(holding)
             continue
         if holding == 0 and close > up:
             holding = 1
@@ -205,7 +231,7 @@ def evaluate(name: str, trades: list) -> Result:
 
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
 
     equity = np.cumprod(1 + arr)
     peak = np.maximum.accumulate(equity)
@@ -216,7 +242,7 @@ def evaluate(name: str, trades: list) -> Result:
         total_return_pct=round((equity[-1] - 1) * 100, 2),
         win_rate_pct=round(len(wins) / len(arr) * 100, 1),
         total_trades=len(arr),
-        profit_factor=round(profit_factor, 2),
+        profit_factor=None if profit_factor is None else round(profit_factor, 2),
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
     )
@@ -252,8 +278,9 @@ def main() -> None:
     print(header)
     print("-" * len(header))
     for r in results:
+        pf = "—" if r.profit_factor is None else f"{r.profit_factor}"
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
-              f"{r.win_rate_pct:>8}{r.profit_factor:>7}{r.max_drawdown_pct:>8}%")
+              f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
 
     beat = [r.strategy for r in results if r.total_return_pct > benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
@@ -265,7 +292,7 @@ def main() -> None:
             "candles": len(df),
             "buy_and_hold_return_pct": benchmark,
             "results": [asdict(r) for r in results],
-        }, f, indent=2)
+        }, f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 
 
