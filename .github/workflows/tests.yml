@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Deliberately not requirements.txt. The suite is offline, and installing
+      # only what it genuinely needs keeps yfinance and matplotlib out — which
+      # also proves the signal and evaluation layer still imports without them.
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q

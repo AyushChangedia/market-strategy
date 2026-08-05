@@ -253,14 +253,183 @@ def buy_and_hold(df: pd.DataFrame) -> float:
     return round((df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100, 2)
 
 
+# ---------------------------------------------------------------------------
+# Walk-forward validation
+#
+# A single backtest number says almost nothing: the parameters were chosen
+# knowing the whole series. Walk-forward splits the history into consecutive
+# blocks, fits nothing but *evaluates* on a held-out tail of each block, and
+# asks how much of the in-sample return survived. That is what Finding 3 in the
+# README rests on, and until now the code that produced it was not in the repo.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Fold:
+    fold: int
+    train_from: str
+    train_to: str
+    train_return_pct: float
+    train_trades: int
+    test_from: str
+    test_to: str
+    test_return_pct: float
+    test_trades: int
+    fold_robustness_score: float
+
+
+def fold_bounds(n_candles: int, n_splits: int = 3,
+                train_ratio: float = 0.7) -> list:
+    """
+    Consecutive non-overlapping blocks, each cut into a train then a test half.
+
+    Blocks do not overlap and preserve order, so no fold is ever evaluated on
+    data that precedes the data it was measured against.
+    """
+    if n_splits < 1:
+        raise ValueError("n_splits must be at least 1")
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must sit strictly between 0 and 1")
+
+    size = n_candles // n_splits
+    if size < 2:
+        raise ValueError(
+            f"{n_candles} candles cannot be split into {n_splits} usable folds"
+        )
+
+    bounds = []
+    for i in range(n_splits):
+        start = i * size
+        cut = start + int(size * train_ratio)
+        bounds.append(((start, cut), (cut, start + size)))
+    return bounds
+
+
+def fold_robustness(train_pct: float, test_pct: float) -> float:
+    """
+    The share of the in-sample return that survived out of sample, clamped 0..1.
+
+    A fold that made nothing in training has nothing to degrade from, so it
+    scores 1.0 provided the test half did not do worse.
+    """
+    if train_pct <= 0:
+        return 1.0 if test_pct >= train_pct else 0.0
+    return round(max(0.0, min(test_pct / train_pct, 1.0)), 2)
+
+
+VERDICTS = (
+    (0.7, "ROBUST - out-of-sample performance held up"),
+    (0.4, "WEAK - significant out-of-sample degradation, likely overfitted"),
+    (0.0, "FRAGILE - out-of-sample performance collapsed"),
+)
+
+
+def verdict_for(score: float) -> str:
+    for threshold, text in VERDICTS:
+        if score >= threshold:
+            return text
+    return VERDICTS[-1][1]
+
+
+def segment_performance(df: pd.DataFrame, signal_fn) -> tuple:
+    """Compound return and trade count for one slice, evaluated in isolation."""
+    trades = extract_trades(df, signal_fn(df))
+    if not trades:
+        return 0.0, 0
+    equity = np.cumprod(1 + np.array(trades))
+    return round((equity[-1] - 1) * 100, 2), len(trades)
+
+
+def _day(df: pd.DataFrame, i: int) -> str:
+    return str(pd.Timestamp(df.index[i]).date())
+
+
+def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
+                 n_splits: int = 3, train_ratio: float = 0.7) -> dict:
+    """Run one strategy fold by fold and report how well it held up."""
+    if strategy not in STRATEGIES:
+        raise KeyError(f"unknown strategy {strategy!r}; pick one of {sorted(STRATEGIES)}")
+    label, signal_fn = STRATEGIES[strategy]
+
+    folds = []
+    for i, ((tr_start, tr_end), (te_start, te_end)) in enumerate(
+            fold_bounds(len(df), n_splits, train_ratio), start=1):
+        train, test = df.iloc[tr_start:tr_end], df.iloc[te_start:te_end]
+        train_pct, train_n = segment_performance(train, signal_fn)
+        test_pct, test_n = segment_performance(test, signal_fn)
+
+        folds.append(Fold(
+            fold=i,
+            train_from=_day(df, tr_start), train_to=_day(df, tr_end - 1),
+            train_return_pct=train_pct, train_trades=train_n,
+            test_from=_day(df, te_start), test_to=_day(df, te_end - 1),
+            test_return_pct=test_pct, test_trades=test_n,
+            fold_robustness_score=fold_robustness(train_pct, test_pct),
+        ))
+
+    scores = [f.fold_robustness_score for f in folds]
+    robustness = round(float(np.mean(scores)), 2)
+    oos = np.cumprod([1 + f.test_return_pct / 100 for f in folds])
+
+    return {
+        "symbol": None,
+        "strategy": strategy,
+        "label": label,
+        "n_splits": n_splits,
+        "train_ratio": train_ratio,
+        "total_candles": len(df),
+        "date_from": _day(df, 0),
+        "date_to": _day(df, len(df) - 1),
+        "avg_train_return_pct": round(float(np.mean(
+            [f.train_return_pct for f in folds])), 2),
+        "avg_test_return_pct": round(float(np.mean(
+            [f.test_return_pct for f in folds])), 2),
+        "robustness_score": robustness,
+        "verdict": verdict_for(robustness),
+        "oos_total_trades": sum(f.test_trades for f in folds),
+        "oos_total_return_pct": round(float(oos[-1] - 1) * 100, 2),
+        "buy_and_hold_return_pct": buy_and_hold(df),
+        "folds": [asdict(f) for f in folds],
+        "disclaimer": "Past performance does not guarantee future results. "
+                      "Educational use only.",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest six classic strategies.")
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
     parser.add_argument("--period", default="2y", help="e.g. 1y, 2y, 5y")
     parser.add_argument("--out", default="results/comparison_local.json")
+    parser.add_argument("--walk-forward", metavar="STRATEGY",
+                        help="validate one strategy fold by fold, e.g. rsi")
+    parser.add_argument("--splits", type=int, default=3,
+                        help="walk-forward folds (default 3)")
+    parser.add_argument("--train-ratio", type=float, default=0.7,
+                        help="share of each fold used in sample (default 0.7)")
     args = parser.parse_args()
 
     df = load_prices(args.symbol, args.period)
+
+    if args.walk_forward:
+        report = walk_forward(df, args.walk_forward, args.splits, args.train_ratio)
+        report["symbol"] = args.symbol
+        report["period"] = args.period
+
+        print(f"\n{report['label']}  ·  {report['n_splits']} folds  ·  "
+              f"{report['date_from']} to {report['date_to']}\n")
+        head = f"{'Fold':<7}{'In-sample':>12}{'Out-of-sample':>16}{'Retained':>11}"
+        print(head)
+        print("-" * len(head))
+        for f in report["folds"]:
+            print(f"{f['fold']:<7}{f['train_return_pct']:>11}%"
+                  f"{f['test_return_pct']:>15}%{f['fold_robustness_score']:>11}")
+        print(f"\nRobustness {report['robustness_score']}  ·  {report['verdict']}")
+
+        out = args.out.replace("comparison_local", f"walk_forward_{args.walk_forward}_local")
+        with open(out, "w") as f:
+            json.dump(report, f, indent=2, allow_nan=False)
+        print(f"Saved to {out}")
+        return
+
     benchmark = buy_and_hold(df)
 
     print(f"\n{args.symbol}  ·  {len(df)} daily candles  ·  "
