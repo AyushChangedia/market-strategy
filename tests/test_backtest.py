@@ -20,10 +20,21 @@ from backtest import (
     buy_and_hold,
     evaluate,
     extract_trades,
+    fold_bounds,
+    fold_robustness,
     rsi_series,
     rsi_signals,
+    verdict_for,
+    walk_forward,
     COST_PER_TRADE,
 )
+
+
+def dated(close) -> pd.DataFrame:
+    """An OHLC frame on real trading dates, as walk_forward reports them."""
+    df = frame(close)
+    df.index = pd.bdate_range("2024-07-23", periods=len(df))
+    return df
 
 
 def frame(close) -> pd.DataFrame:
@@ -160,3 +171,107 @@ class TestEvaluate:
 
 def test_buy_and_hold_measures_first_close_to_last():
     assert buy_and_hold(frame([100, 120, 110])) == 10.0
+
+
+class TestFoldBounds:
+    def test_blocks_are_consecutive_and_do_not_overlap(self):
+        bounds = fold_bounds(300, n_splits=3, train_ratio=0.7)
+        assert len(bounds) == 3
+        for (tr_start, tr_end), (te_start, te_end) in bounds:
+            assert tr_start < tr_end == te_start < te_end
+        # each block begins where the previous one ended
+        assert bounds[0][1][1] == bounds[1][0][0]
+        assert bounds[1][1][1] == bounds[2][0][0]
+
+    def test_reproduces_the_published_495_candle_layout(self):
+        # results/walk_forward_rsi.json was built from 495 candles, 3 splits,
+        # 0.7 train. These bounds are what its fold dates imply.
+        assert fold_bounds(495, 3, 0.7) == [
+            ((0, 115), (115, 165)),
+            ((165, 280), (280, 330)),
+            ((330, 445), (445, 495)),
+        ]
+
+    def test_never_evaluates_on_data_before_it_was_measured(self):
+        # Test halves must always follow their own training half.
+        for (_, tr_end), (te_start, _) in fold_bounds(400, 4, 0.6):
+            assert te_start >= tr_end
+
+    def test_rejects_a_series_too_short_to_split(self):
+        with pytest.raises(ValueError):
+            fold_bounds(4, n_splits=3)
+
+    def test_rejects_a_nonsensical_train_ratio(self):
+        with pytest.raises(ValueError):
+            fold_bounds(300, train_ratio=0.0)
+        with pytest.raises(ValueError):
+            fold_bounds(300, train_ratio=1.0)
+
+
+class TestFoldRobustness:
+    def test_reports_the_share_of_return_that_survived(self):
+        # Fold 1 of the published run: 8.18% in sample, 3.11% out.
+        assert fold_robustness(8.18, 3.11) == 0.38
+
+    def test_a_fold_that_earned_nothing_in_training_is_consistent(self):
+        # Nothing to degrade from, so it does not count against the strategy.
+        assert fold_robustness(0.0, 0.0) == 1.0
+
+    def test_losing_everything_out_of_sample_scores_zero(self):
+        assert fold_robustness(3.01, 0.0) == 0.0
+
+    def test_is_clamped_to_one_when_the_test_half_did_better(self):
+        assert fold_robustness(2.0, 8.0) == 1.0
+
+    def test_a_losing_test_half_scores_zero(self):
+        assert fold_robustness(5.0, -3.0) == 0.0
+
+
+class TestVerdict:
+    def test_a_strategy_that_held_up_is_robust(self):
+        assert verdict_for(0.85).startswith("ROBUST")
+
+    def test_the_published_score_reads_as_weak(self):
+        # 0.46 is the committed robustness_score for RSI.
+        assert verdict_for(0.46).startswith("WEAK")
+
+    def test_a_collapse_is_fragile(self):
+        assert verdict_for(0.1).startswith("FRAGILE")
+
+
+class TestWalkForward:
+    def test_reports_one_entry_per_fold(self):
+        report = walk_forward(dated(np.linspace(100, 130, 300)), "rsi", n_splits=3)
+        assert len(report["folds"]) == 3
+        assert [f["fold"] for f in report["folds"]] == [1, 2, 3]
+
+    def test_fold_dates_run_forward_without_gaps_in_order(self):
+        report = walk_forward(dated(np.linspace(100, 130, 300)), "rsi", n_splits=3)
+        for f in report["folds"]:
+            assert f["train_from"] <= f["train_to"] < f["test_from"] <= f["test_to"]
+
+    def test_averages_match_the_folds_it_reported(self):
+        report = walk_forward(dated(np.linspace(100, 130, 300)), "rsi", n_splits=3)
+        folds = report["folds"]
+        assert report["avg_train_return_pct"] == pytest.approx(
+            np.mean([f["train_return_pct"] for f in folds]), abs=0.01)
+        assert report["robustness_score"] == pytest.approx(
+            np.mean([f["fold_robustness_score"] for f in folds]), abs=0.01)
+
+    def test_the_verdict_follows_the_score(self):
+        report = walk_forward(dated(np.linspace(100, 130, 300)), "rsi", n_splits=3)
+        assert report["verdict"] == verdict_for(report["robustness_score"])
+
+    def test_the_report_is_strict_json(self):
+        report = walk_forward(dated(np.linspace(100, 130, 300)), "rsi", n_splits=3)
+        assert json.loads(json.dumps(report, allow_nan=False))["strategy"] == "rsi"
+
+    def test_rejects_an_unknown_strategy(self):
+        with pytest.raises(KeyError):
+            walk_forward(dated(np.linspace(100, 130, 300)), "not_a_strategy")
+
+    def test_works_for_every_registered_strategy(self):
+        from backtest import STRATEGIES
+        df = dated(np.linspace(100, 130, 300))
+        for key in STRATEGIES:
+            assert walk_forward(df, key, n_splits=3)["strategy"] == key
