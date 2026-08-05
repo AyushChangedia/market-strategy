@@ -1,8 +1,12 @@
 """Generate the result charts used in the README.
 
-Numbers are hardcoded from the backtest output in results/comparison.json
-so the charts can be regenerated without re-running the data pull.
+Every number is read from results/*.json, so the charts and the published
+metrics cannot drift apart. Regenerating them still needs no data pull — the
+committed result files are the input.
 """
+
+import json
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -30,12 +34,38 @@ plt.rcParams.update({
     "font.family": "DejaVu Sans",
 })
 
-STRATEGIES = ["RSI", "MACD", "EMA 20/50", "Donchian", "Bollinger", "Supertrend"]
-RETURNS = [5.35, 4.95, 4.39, 0.0, -1.07, -3.24]
-TRADES = [6, 18, 3, 0, 7, 8]
-WIN_RATE = [50.0, 33.3, 33.3, 0.0, 57.1, 25.0]
-PROFIT_FACTOR = [1.91, 1.39, 2.75, 0.0, 0.92, 0.88]
-BUY_HOLD = 9.3
+RESULTS = Path(__file__).resolve().parent / "results"
+
+# The JSON carries full labels; the charts need something that fits an axis.
+SHORT_NAMES = {
+    "rsi": "RSI",
+    "macd": "MACD",
+    "ema_cross": "EMA 20/50",
+    "donchian": "Donchian",
+    "bollinger": "Bollinger",
+    "supertrend": "Supertrend",
+}
+
+
+def load(filename: str) -> dict:
+    path = RESULTS / filename
+    if not path.exists():
+        raise SystemExit(f"{path} not found — run backtest.py first.")
+    with open(path) as handle:
+        return json.load(handle)
+
+
+COMPARISON = load("comparison.json")
+RANKING = COMPARISON["ranking"]
+
+STRATEGIES = [SHORT_NAMES.get(r["strategy"], r["label"]) for r in RANKING]
+RETURNS = [r["total_return_pct"] for r in RANKING]
+TRADES = [r["total_trades"] for r in RANKING]
+WIN_RATE = [r["win_rate_pct"] for r in RANKING]
+# An undefined profit factor serialises as null; plot it at zero like a
+# strategy that never traded, which is how it already appeared.
+PROFIT_FACTOR = [r["profit_factor"] or 0.0 for r in RANKING]
+BUY_HOLD = COMPARISON["buy_and_hold_return_pct"]
 
 
 def returns_chart():
@@ -45,7 +75,7 @@ def returns_chart():
     bars = ax.bar(STRATEGIES, RETURNS, color=colors, width=0.62, zorder=3)
 
     ax.axhline(BUY_HOLD, color=TEXT, linestyle="--", linewidth=1.6, zorder=4)
-    ax.text(5.45, BUY_HOLD + 0.35, f"Buy & hold  {BUY_HOLD}%",
+    ax.text(len(STRATEGIES) - 0.55, BUY_HOLD + 0.35, f"Buy & hold  {BUY_HOLD}%",
             color=TEXT, fontsize=10, ha="right", fontweight="bold")
     ax.axhline(0, color=GRID, linewidth=1.2, zorder=2)
 
@@ -54,7 +84,7 @@ def returns_chart():
         ax.text(bar.get_x() + bar.get_width() / 2, val + offset, f"{val}%",
                 ha="center", color=TEXT, fontsize=10, zorder=5)
 
-    ax.set_ylim(-5.2, 11)
+    ax.set_ylim(min(min(RETURNS), 0) * 1.6, max(max(RETURNS), BUY_HOLD) * 1.18)
     ax.set_ylabel("Total return (%)", fontsize=11)
     ax.set_title("Not one strategy beat doing nothing",
                  fontsize=15, fontweight="bold", pad=16, loc="left")
@@ -79,7 +109,7 @@ def winrate_chart():
     colors = [BLUE if PROFIT_FACTOR[i] > 1 else RED for i in live]
 
     ax.axhline(1.0, color=MUTED, linestyle="--", linewidth=1.5, zorder=2)
-    ax.text(60.5, 1.03, "break-even", color=MUTED, fontsize=9.5, ha="right")
+    ax.text(max(x) + 3.5, 1.03, "break-even", color=MUTED, fontsize=9.5, ha="right")
 
     ax.scatter(x, y, s=sizes, c=colors, alpha=0.72,
                edgecolors=TEXT, linewidths=1.1, zorder=3)
@@ -100,8 +130,8 @@ def winrate_chart():
             "Bubble size = number of trades.  Bollinger wins most often and still loses money.",
             transform=ax.transAxes, color=MUTED, fontsize=10)
 
-    ax.set_xlim(18, 62)
-    ax.set_ylim(0.6, 3.1)
+    ax.set_xlim(min(x) - 7, max(x) + 5)
+    ax.set_ylim(min(y) - 0.28, max(y) + 0.35)
     ax.grid(color=GRID, linewidth=0.9, zorder=0)
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
@@ -116,9 +146,12 @@ def walkforward_chart():
     """In-sample vs out-of-sample — the overfitting lesson."""
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    folds = ["Fold 1", "Fold 2", "Fold 3", "Average"]
-    train = [8.18, 0.0, 3.01, 3.73]
-    test = [3.11, 0.0, 0.0, 1.04]
+    report = load("walk_forward_rsi.json")
+    rows = report["folds"]
+
+    folds = [f"Fold {r['fold']}" for r in rows] + ["Average"]
+    train = [r["train_return_pct"] for r in rows] + [report["avg_train_return_pct"]]
+    test = [r["test_return_pct"] for r in rows] + [report["avg_test_return_pct"]]
 
     idx = np.arange(len(folds))
     width = 0.36
@@ -137,12 +170,15 @@ def walkforward_chart():
     ax.set_xticks(idx)
     ax.set_xticklabels(folds)
     ax.set_ylabel("Return (%)", fontsize=11)
-    ax.set_ylim(0, 9.6)
-    ax.set_title("RSI, the best performer, mostly stopped working on unseen data",
+    ax.set_ylim(0, max(train + test) * 1.17)
+    ax.set_title(f"{report['label'].split()[0]}, the best performer, "
+                 "mostly stopped working on unseen data",
                  fontsize=15, fontweight="bold", pad=16, loc="left")
+    trades = report["oos_total_trades"]
     ax.text(0.0, -0.16,
-            "Robustness score 0.46 — verdict: likely overfitted.  The entire out-of-sample "
-            "period produced 1 trade.",
+            f"Robustness score {report['robustness_score']} — verdict: likely overfitted.  "
+            f"The entire out-of-sample period produced {trades} "
+            f"trade{'' if trades == 1 else 's'}.",
             transform=ax.transAxes, color=MUTED, fontsize=10)
 
     leg = ax.legend(frameon=False, loc="upper right", fontsize=10.5)
