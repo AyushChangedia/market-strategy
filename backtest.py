@@ -394,6 +394,50 @@ def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
     }
 
 
+# Yahoo tickers carry no display name, so the few this project uses are mapped
+# by hand. Anything else falls back to the ticker itself.
+INSTRUMENT_NAMES = {
+    "^NSEBANK": "Bank Nifty Index",
+    "^NSEI": "Nifty 50 Index",
+}
+
+
+def comparison_report(symbol: str, period: str, df: pd.DataFrame,
+                      benchmark: float, ranked: list) -> dict:
+    """
+    Build the results document in the shape make_charts.py reads.
+
+    The two had drifted: this wrote {"results": [...]} keyed by display label,
+    while the charts read {"ranking": [...]} keyed by strategy id. Regenerating
+    the results therefore produced a file that crashed chart generation, and
+    only the committed copy — written by an earlier version of this script —
+    still worked.
+    """
+    return {
+        "symbol": symbol,
+        "instrument": INSTRUMENT_NAMES.get(symbol, symbol),
+        "period": period,
+        "interval": "1d",
+        "candles_analyzed": len(df),
+        "date_from": _day(df, 0),
+        "date_to": _day(df, len(df) - 1),
+        "commission_pct": round(COMMISSION_PCT * 100, 4),
+        "slippage_pct": round(SLIPPAGE_PCT * 100, 4),
+        "buy_and_hold_return_pct": benchmark,
+        "ranking": [
+            {
+                "rank": i,
+                "strategy": key,
+                "label": r.strategy,
+                **{k: v for k, v in asdict(r).items() if k != "strategy"},
+            }
+            for i, (key, r) in enumerate(ranked, start=1)
+        ],
+        "disclaimer": "Past performance does not guarantee future results. "
+                      "Educational use only.",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest six classic strategies.")
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
@@ -439,29 +483,24 @@ def main() -> None:
     results = []
     for key, (label, signal_fn) in STRATEGIES.items():
         trades = extract_trades(df, signal_fn(df))
-        results.append(evaluate(label, trades))
+        results.append((key, evaluate(label, trades)))
 
-    results.sort(key=lambda r: r.total_return_pct, reverse=True)
+    results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
 
     header = f"{'Strategy':<34}{'Return':>9}{'Trades':>8}{'Win%':>8}{'PF':>7}{'MaxDD':>9}"
     print(header)
     print("-" * len(header))
-    for r in results:
+    for _, r in results:
         pf = "—" if r.profit_factor is None else f"{r.profit_factor}"
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
               f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
 
-    beat = [r.strategy for r in results if r.total_return_pct > benchmark]
+    beat = [r.strategy for _, r in results if r.total_return_pct > benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
 
     with open(args.out, "w") as f:
-        json.dump({
-            "symbol": args.symbol,
-            "period": args.period,
-            "candles": len(df),
-            "buy_and_hold_return_pct": benchmark,
-            "results": [asdict(r) for r in results],
-        }, f, indent=2, allow_nan=False)
+        json.dump(comparison_report(args.symbol, args.period, df, benchmark, results),
+                  f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 
 
