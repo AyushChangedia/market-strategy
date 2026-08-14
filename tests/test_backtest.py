@@ -10,13 +10,17 @@ Everything here is synthetic and offline — no network, no yfinance.
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from backtest import (
+    INSTRUMENT_NAMES,
+    STRATEGIES,
     bollinger_signals,
+    comparison_report,
     buy_and_hold,
     evaluate,
     extract_trades,
@@ -275,3 +279,93 @@ class TestWalkForward:
         df = dated(np.linspace(100, 130, 300))
         for key in STRATEGIES:
             assert walk_forward(df, key, n_splits=3)["strategy"] == key
+
+
+# The keys make_charts.py reads out of results/comparison.json. If this list
+# and the writer ever disagree again, chart generation dies with a KeyError
+# rather than a useful message — which is exactly what happened once already.
+CHART_TOP_LEVEL = ("ranking", "buy_and_hold_return_pct")
+CHART_ROW_KEYS = ("strategy", "label", "total_return_pct", "total_trades",
+                  "win_rate_pct", "profit_factor")
+
+
+def report_for(days: int = 300) -> dict:
+    df = dated(np.linspace(100, 130, days))
+    ranked = []
+    for key, (label, fn) in STRATEGIES.items():
+        ranked.append((key, evaluate(label, extract_trades(df, fn(df)))))
+    ranked.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
+    return comparison_report("^NSEBANK", "2y", df, buy_and_hold(df), ranked)
+
+
+class TestComparisonReport:
+    def test_carries_every_key_the_charts_read(self):
+        report = report_for()
+        for key in CHART_TOP_LEVEL:
+            assert key in report, f"make_charts.py reads {key!r}"
+
+    def test_every_ranking_row_carries_the_keys_the_charts_read(self):
+        for row in report_for()["ranking"]:
+            for key in CHART_ROW_KEYS:
+                assert key in row, f"make_charts.py reads row[{key!r}]"
+
+    def test_identifies_strategies_by_id_not_display_label(self):
+        # The charts map row["strategy"] through SHORT_NAMES, which is keyed by
+        # id. Writing the label here is what broke chart generation before.
+        ids = {row["strategy"] for row in report_for()["ranking"]}
+        assert ids == set(STRATEGIES)
+
+    def test_labels_match_the_strategy_registry(self):
+        for row in report_for()["ranking"]:
+            assert row["label"] == STRATEGIES[row["strategy"]][0]
+
+    def test_covers_every_registered_strategy_once(self):
+        rows = report_for()["ranking"]
+        assert len(rows) == len(STRATEGIES)
+
+    def test_ranks_run_from_one_in_descending_return_order(self):
+        rows = report_for()["ranking"]
+        assert [r["rank"] for r in rows] == list(range(1, len(rows) + 1))
+        returns = [r["total_return_pct"] for r in rows]
+        assert returns == sorted(returns, reverse=True)
+
+    def test_records_the_run_metadata(self):
+        report = report_for()
+        assert report["symbol"] == "^NSEBANK"
+        assert report["instrument"] == INSTRUMENT_NAMES["^NSEBANK"]
+        assert report["candles_analyzed"] == 300
+        assert report["date_from"] <= report["date_to"]
+
+    def test_falls_back_to_the_ticker_for_an_unmapped_symbol(self):
+        df = dated(np.linspace(100, 130, 300))
+        report = comparison_report("RELIANCE.NS", "2y", df, 1.0, [])
+        assert report["instrument"] == "RELIANCE.NS"
+
+    def test_states_the_cost_rates_actually_charged(self):
+        report = report_for()
+        assert report["commission_pct"] == pytest.approx(0.1)
+        assert report["slippage_pct"] == pytest.approx(0.05)
+
+    def test_is_strict_json(self):
+        # An undefined profit factor must serialise as null, not Infinity.
+        blob = json.dumps(report_for(), allow_nan=False)
+        assert json.loads(blob)["ranking"][0]["rank"] == 1
+
+
+class TestCommittedResults:
+    """The published file the README's tables and charts are built from."""
+
+    def test_satisfies_the_same_contract_as_a_fresh_run(self):
+        path = Path(__file__).resolve().parents[1] / "results" / "comparison.json"
+        committed = json.loads(path.read_text())
+        for key in CHART_TOP_LEVEL:
+            assert key in committed
+        for row in committed["ranking"]:
+            for key in CHART_ROW_KEYS:
+                assert key in row
+
+    def test_names_only_strategies_that_still_exist(self):
+        path = Path(__file__).resolve().parents[1] / "results" / "comparison.json"
+        committed = json.loads(path.read_text())
+        for row in committed["ranking"]:
+            assert row["strategy"] in STRATEGIES
