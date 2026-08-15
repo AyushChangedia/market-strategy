@@ -198,8 +198,30 @@ STRATEGIES = {
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def extract_trades(df: pd.DataFrame, position: pd.Series) -> list:
-    """Walk the position series and return each completed trade's net return."""
+def extract_trades(df: pd.DataFrame, position: pd.Series,
+                   fill: str = "close") -> list:
+    """
+    Walk the position series and return each completed trade's net return.
+
+    `fill` decides which bar the order is assumed to execute on:
+
+      "close"     the same bar that produced the signal. Every indicator here
+                  is computed from that bar's close, so this assumes you saw
+                  the close and still traded at it — a market-on-close order
+                  gets you near it, but not reliably.
+      "next-bar"  the following bar's close, which is the earliest price you
+                  could actually have acted on.
+
+    The default is unchanged so published figures stay reproducible; pass
+    "next-bar" to see how much of an edge survives a realistic fill.
+    """
+    if fill not in ("close", "next-bar"):
+        raise ValueError(f"fill must be 'close' or 'next-bar', got {fill!r}")
+
+    step = 1 if fill == "next-bar" else 0
+    last = len(df) - 1
+    price_at = lambda i: df["Close"].iloc[min(i + step, last)]
+
     trades = []
     entry_price = None
 
@@ -208,9 +230,9 @@ def extract_trades(df: pd.DataFrame, position: pd.Series) -> list:
         now_long = position.iloc[i] == 1
 
         if was_flat and now_long:
-            entry_price = df["Close"].iloc[i]
+            entry_price = price_at(i)
         elif not was_flat and not now_long and entry_price is not None:
-            exit_price = df["Close"].iloc[i]
+            exit_price = price_at(i)
             gross = (exit_price - entry_price) / entry_price
             trades.append(gross - COST_PER_TRADE)   # costs on every trade
             entry_price = None
@@ -482,6 +504,8 @@ def main() -> None:
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
     parser.add_argument("--period", default="2y", help="e.g. 1y, 2y, 5y")
     parser.add_argument("--out", default="results/comparison_local.json")
+    parser.add_argument("--fill", choices=("close", "next-bar"), default="close",
+                        help="bar the order fills on (default: close)")
     parser.add_argument("--strategy", metavar="NAME", action="append",
                         help="run only this strategy; repeatable")
     parser.add_argument("--list-strategies", action="store_true",
@@ -538,7 +562,7 @@ def main() -> None:
     results = []
     for key in chosen:
         label, signal_fn = STRATEGIES[key]
-        trades = extract_trades(df, signal_fn(df))
+        trades = extract_trades(df, signal_fn(df), fill=args.fill)
         results.append((key, evaluate(label, trades)))
 
     results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
