@@ -273,6 +273,20 @@ def buy_and_hold(df: pd.DataFrame) -> float:
     return round((df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100, 2)
 
 
+def buy_and_hold_net(df: pd.DataFrame) -> float:
+    """
+    The same benchmark after paying to get in and out.
+
+    Every strategy is charged COST_PER_TRADE on each round trip while the
+    benchmark was quoted gross, which flattered it by exactly the cost of the
+    one round trip it also has to make. The gap is small over two years and
+    does not overturn the headline finding, but comparing a net number against
+    a gross one is not a fair test, so both are reported.
+    """
+    gross = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1)
+    return round((gross - COST_PER_TRADE) * 100, 2)
+
+
 # ---------------------------------------------------------------------------
 # Walk-forward validation
 #
@@ -423,7 +437,8 @@ INSTRUMENT_NAMES = {
 
 
 def comparison_report(symbol: str, period: str, df: pd.DataFrame,
-                      benchmark: float, ranked: list) -> dict:
+                      benchmark: float, ranked: list,
+                      net_benchmark: float | None = None) -> dict:
     """
     Build the results document in the shape make_charts.py reads.
 
@@ -433,6 +448,9 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
     only the committed copy — written by an earlier version of this script —
     still worked.
     """
+    if net_benchmark is None:
+        net_benchmark = round(benchmark - COST_PER_TRADE * 100, 2)
+
     return {
         "symbol": symbol,
         "instrument": INSTRUMENT_NAMES.get(symbol, symbol),
@@ -444,6 +462,7 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
         "commission_pct": round(COMMISSION_PCT * 100, 4),
         "slippage_pct": round(SLIPPAGE_PCT * 100, 4),
         "buy_and_hold_return_pct": benchmark,
+        "buy_and_hold_net_return_pct": net_benchmark,
         "ranking": [
             {
                 "rank": i,
@@ -495,10 +514,11 @@ def main() -> None:
         return
 
     benchmark = buy_and_hold(df)
+    net_benchmark = buy_and_hold_net(df)
 
     print(f"\n{args.symbol}  ·  {len(df)} daily candles  ·  "
           f"{df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Buy & hold: {benchmark}%\n")
+    print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after costs)\n")
 
     results = []
     for key, (label, signal_fn) in STRATEGIES.items():
@@ -515,11 +535,12 @@ def main() -> None:
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
               f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
 
-    beat = [r.strategy for _, r in results if r.total_return_pct > benchmark]
+    beat = [r.strategy for _, r in results if r.total_return_pct > net_benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
 
     with open(args.out, "w") as f:
-        json.dump(comparison_report(args.symbol, args.period, df, benchmark, results),
+        json.dump(comparison_report(args.symbol, args.period, df, benchmark,
+                                    results, net_benchmark),
                   f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 
