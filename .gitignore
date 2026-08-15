@@ -3,4 +3,7 @@ __pycache__/
 .env
 .venv/
 venv/
+# Local runs write alongside the committed results; only the published files
+# belong in git.
 results/comparison_local.json
+results/walk_forward_*_local.json
