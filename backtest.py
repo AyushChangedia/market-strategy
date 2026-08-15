@@ -482,6 +482,10 @@ def main() -> None:
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
     parser.add_argument("--period", default="2y", help="e.g. 1y, 2y, 5y")
     parser.add_argument("--out", default="results/comparison_local.json")
+    parser.add_argument("--strategy", metavar="NAME", action="append",
+                        help="run only this strategy; repeatable")
+    parser.add_argument("--list-strategies", action="store_true",
+                        help="print the registered strategy ids and exit")
     parser.add_argument("--walk-forward", metavar="STRATEGY",
                         help="validate one strategy fold by fold, e.g. rsi")
     parser.add_argument("--splits", type=int, default=3,
@@ -489,6 +493,17 @@ def main() -> None:
     parser.add_argument("--train-ratio", type=float, default=0.7,
                         help="share of each fold used in sample (default 0.7)")
     args = parser.parse_args()
+
+    if args.list_strategies:
+        for key, (label, _) in STRATEGIES.items():
+            print(f"{key:<12}{label}")
+        return
+
+    chosen = args.strategy or list(STRATEGIES)
+    unknown = [k for k in chosen if k not in STRATEGIES]
+    if unknown:
+        parser.error(f"unknown strategy {unknown[0]!r}; "
+                     f"pick from {', '.join(STRATEGIES)}")
 
     df = load_prices(args.symbol, args.period)
 
@@ -521,7 +536,8 @@ def main() -> None:
     print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after costs)\n")
 
     results = []
-    for key, (label, signal_fn) in STRATEGIES.items():
+    for key in chosen:
+        label, signal_fn = STRATEGIES[key]
         trades = extract_trades(df, signal_fn(df))
         results.append((key, evaluate(label, trades)))
 
