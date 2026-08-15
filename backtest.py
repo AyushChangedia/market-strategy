@@ -32,6 +32,7 @@ class Result:
     total_return_pct: float
     win_rate_pct: float
     total_trades: int
+    scratch_trades: int
     # None when there are no losing trades to divide by — an undefined ratio,
     # not an infinite one. float("inf") serialises as the bare token Infinity,
     # which json.dump emits happily but strict JSON parsers reject.
@@ -224,10 +225,17 @@ def extract_trades(df: pd.DataFrame, position: pd.Series) -> list:
 def evaluate(name: str, trades: list) -> Result:
     """Turn a list of trade returns into the metrics that matter."""
     if not trades:
-        return Result(name, 0.0, 0.0, 0, 0.0, 0.0, 0.0)
+        return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
+                      total_trades=0, scratch_trades=0, profit_factor=0.0,
+                      max_drawdown_pct=0.0, expectancy_pct=0.0)
 
     arr = np.array(trades)
-    wins, losses = arr[arr > 0], arr[arr <= 0]
+    # A trade that came back exactly flat is neither a win nor a loss. Bundling
+    # it with the losers understated win rate and, because it adds nothing to
+    # gross loss, quietly moved the profit factor's denominator count without
+    # moving the denominator.
+    wins, losses = arr[arr > 0], arr[arr < 0]
+    scratches = int((arr == 0).sum())
 
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())
@@ -241,6 +249,7 @@ def evaluate(name: str, trades: list) -> Result:
         strategy=name,
         total_return_pct=round((equity[-1] - 1) * 100, 2),
         win_rate_pct=round(len(wins) / len(arr) * 100, 1),
+        scratch_trades=scratches,
         total_trades=len(arr),
         profit_factor=None if profit_factor is None else round(profit_factor, 2),
         max_drawdown_pct=round(max_dd, 2),
