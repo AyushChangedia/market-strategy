@@ -140,10 +140,35 @@ pip install -r requirements.txt
 
 python backtest.py                              # Bank Nifty, 2 years
 python backtest.py --symbol ^NSEI --period 5y   # Nifty 50, 5 years
-python make_charts.py                           # regenerate the charts
+python backtest.py --list-strategies            # what is registered
+python backtest.py --strategy rsi --strategy macd
 ```
 
 Any Yahoo Finance ticker works: `^NSEBANK`, `^NSEI`, `RELIANCE.NS`, `TCS.NS`.
+
+**Validation and fills**
+
+```bash
+python backtest.py --walk-forward rsi           # fold-by-fold, the Finding 3 run
+python backtest.py --walk-forward rsi --splits 4 --train-ratio 0.6
+python backtest.py --fill next-bar              # how much edge survives a real fill
+```
+
+`--fill` decides which bar an order executes on. The default, `close`, books
+the trade at the same close that produced the signal — convenient, and slightly
+generous. `next-bar` books it at the following close, the earliest price you
+could actually have acted on. Every published figure here uses the default.
+
+**Figures and tests**
+
+```bash
+python make_charts.py                           # regenerate the three charts
+python make_banner.py                           # regenerate the README banner
+pip install -r requirements-dev.txt && pytest -q # 67 offline tests
+```
+
+The charts read `results/*.json`, so they never re-fetch data. The test suite
+needs no network and no `yfinance`.
 
 ---
 
@@ -151,8 +176,11 @@ Any Yahoo Finance ticker works: `^NSEBANK`, `^NSEI`, `RELIANCE.NS`, `TCS.NS`.
 
 ```
 market-strategy/
-├── backtest.py                      six strategies, cost-aware evaluation
-├── make_charts.py                   chart generation
+├── backtest.py                      six strategies, cost-aware evaluation,
+│                                    walk-forward validation
+├── make_charts.py                   the three result charts
+├── make_banner.py                   the README hero
+├── tests/test_backtest.py           67 offline regression tests
 ├── results/
 │   ├── comparison.json              full metrics for all six
 │   └── walk_forward_rsi.json        fold-by-fold validation output
@@ -161,7 +189,13 @@ market-strategy/
 
 Each strategy is a function returning a position series (`1` long, `0` flat).
 Adding a seventh means writing one function and registering it in `STRATEGIES` —
-the evaluation, cost model and reporting apply automatically.
+the evaluation, cost model, walk-forward validation and reporting all apply
+automatically, and the test suite picks it up too.
+
+**On the benchmark.** Buy-and-hold is reported twice: gross, and net of the one
+round trip it also has to pay. The tables above quote the gross 9.30%; the net
+figure is 9.15%, which does not change the conclusion but makes the comparison
+like-for-like, since every strategy is charged on every trade.
 
 ---
 
