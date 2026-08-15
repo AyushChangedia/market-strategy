@@ -37,6 +37,7 @@ class Result:
     # not an infinite one. float("inf") serialises as the bare token Infinity,
     # which json.dump emits happily but strict JSON parsers reject.
     profit_factor: Optional[float]
+    sharpe_ratio: float
     max_drawdown_pct: float
     expectancy_pct: float
 
@@ -227,7 +228,8 @@ def evaluate(name: str, trades: list) -> Result:
     if not trades:
         return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
                       total_trades=0, scratch_trades=0, profit_factor=0.0,
-                      max_drawdown_pct=0.0, expectancy_pct=0.0)
+                      sharpe_ratio=0.0, max_drawdown_pct=0.0,
+                      expectancy_pct=0.0)
 
     arr = np.array(trades)
     # A trade that came back exactly flat is neither a win nor a loss. Bundling
@@ -245,6 +247,14 @@ def evaluate(name: str, trades: list) -> Result:
     peak = np.maximum.accumulate(equity)
     max_dd = ((equity - peak) / peak).min() * 100
 
+    # Sharpe over the trade sequence: mean return per trade against its own
+    # dispersion, annualised by the number of trades actually taken. Reported
+    # per-trade rather than per-day because the strategies hold for wildly
+    # different spans, so a daily series would be mostly zeroes.
+    sharpe = 0.0
+    if len(arr) > 1 and arr.std(ddof=1) > 0:
+        sharpe = float(arr.mean() / arr.std(ddof=1) * np.sqrt(len(arr)))
+
     return Result(
         strategy=name,
         total_return_pct=round((equity[-1] - 1) * 100, 2),
@@ -252,6 +262,7 @@ def evaluate(name: str, trades: list) -> Result:
         scratch_trades=scratches,
         total_trades=len(arr),
         profit_factor=None if profit_factor is None else round(profit_factor, 2),
+        sharpe_ratio=round(sharpe, 2),
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
     )
