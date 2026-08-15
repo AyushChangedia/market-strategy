@@ -33,3 +33,36 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  # The figures in the README are generated, not drawn. If either generator
+  # breaks nobody finds out until someone tries to refresh the results, so
+  # both run here against the committed inputs. This checks they execute; it
+  # does not compare pixels.
+  figures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install plotting dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy matplotlib pillow
+
+      - name: Regenerate the charts from the committed results
+        run: python make_charts.py
+
+      - name: Regenerate the banner
+        run: python make_banner.py --out /tmp/banner.png
+
+      - name: Confirm every figure was written
+        run: |
+          set -euo pipefail
+          for f in assets/returns.png assets/winrate.png assets/walkforward.png /tmp/banner.png; do
+            [ -s "$f" ] || { echo "::error::$f missing or empty"; exit 1; }
+          done
+          echo "all figures generated"
