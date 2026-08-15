@@ -32,10 +32,12 @@ class Result:
     total_return_pct: float
     win_rate_pct: float
     total_trades: int
+    scratch_trades: int
     # None when there are no losing trades to divide by — an undefined ratio,
     # not an infinite one. float("inf") serialises as the bare token Infinity,
     # which json.dump emits happily but strict JSON parsers reject.
     profit_factor: Optional[float]
+    sharpe_ratio: float
     max_drawdown_pct: float
     expectancy_pct: float
 
@@ -196,8 +198,30 @@ STRATEGIES = {
 # Evaluation
 # ---------------------------------------------------------------------------
 
-def extract_trades(df: pd.DataFrame, position: pd.Series) -> list:
-    """Walk the position series and return each completed trade's net return."""
+def extract_trades(df: pd.DataFrame, position: pd.Series,
+                   fill: str = "close") -> list:
+    """
+    Walk the position series and return each completed trade's net return.
+
+    `fill` decides which bar the order is assumed to execute on:
+
+      "close"     the same bar that produced the signal. Every indicator here
+                  is computed from that bar's close, so this assumes you saw
+                  the close and still traded at it — a market-on-close order
+                  gets you near it, but not reliably.
+      "next-bar"  the following bar's close, which is the earliest price you
+                  could actually have acted on.
+
+    The default is unchanged so published figures stay reproducible; pass
+    "next-bar" to see how much of an edge survives a realistic fill.
+    """
+    if fill not in ("close", "next-bar"):
+        raise ValueError(f"fill must be 'close' or 'next-bar', got {fill!r}")
+
+    step = 1 if fill == "next-bar" else 0
+    last = len(df) - 1
+    price_at = lambda i: df["Close"].iloc[min(i + step, last)]
+
     trades = []
     entry_price = None
 
@@ -206,9 +230,9 @@ def extract_trades(df: pd.DataFrame, position: pd.Series) -> list:
         now_long = position.iloc[i] == 1
 
         if was_flat and now_long:
-            entry_price = df["Close"].iloc[i]
+            entry_price = price_at(i)
         elif not was_flat and not now_long and entry_price is not None:
-            exit_price = df["Close"].iloc[i]
+            exit_price = price_at(i)
             gross = (exit_price - entry_price) / entry_price
             trades.append(gross - COST_PER_TRADE)   # costs on every trade
             entry_price = None
@@ -224,10 +248,18 @@ def extract_trades(df: pd.DataFrame, position: pd.Series) -> list:
 def evaluate(name: str, trades: list) -> Result:
     """Turn a list of trade returns into the metrics that matter."""
     if not trades:
-        return Result(name, 0.0, 0.0, 0, 0.0, 0.0, 0.0)
+        return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
+                      total_trades=0, scratch_trades=0, profit_factor=0.0,
+                      sharpe_ratio=0.0, max_drawdown_pct=0.0,
+                      expectancy_pct=0.0)
 
     arr = np.array(trades)
-    wins, losses = arr[arr > 0], arr[arr <= 0]
+    # A trade that came back exactly flat is neither a win nor a loss. Bundling
+    # it with the losers understated win rate and, because it adds nothing to
+    # gross loss, quietly moved the profit factor's denominator count without
+    # moving the denominator.
+    wins, losses = arr[arr > 0], arr[arr < 0]
+    scratches = int((arr == 0).sum())
 
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())
@@ -237,12 +269,22 @@ def evaluate(name: str, trades: list) -> Result:
     peak = np.maximum.accumulate(equity)
     max_dd = ((equity - peak) / peak).min() * 100
 
+    # Sharpe over the trade sequence: mean return per trade against its own
+    # dispersion, annualised by the number of trades actually taken. Reported
+    # per-trade rather than per-day because the strategies hold for wildly
+    # different spans, so a daily series would be mostly zeroes.
+    sharpe = 0.0
+    if len(arr) > 1 and arr.std(ddof=1) > 0:
+        sharpe = float(arr.mean() / arr.std(ddof=1) * np.sqrt(len(arr)))
+
     return Result(
         strategy=name,
         total_return_pct=round((equity[-1] - 1) * 100, 2),
         win_rate_pct=round(len(wins) / len(arr) * 100, 1),
+        scratch_trades=scratches,
         total_trades=len(arr),
         profit_factor=None if profit_factor is None else round(profit_factor, 2),
+        sharpe_ratio=round(sharpe, 2),
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
     )
@@ -251,6 +293,20 @@ def evaluate(name: str, trades: list) -> Result:
 def buy_and_hold(df: pd.DataFrame) -> float:
     """The benchmark every strategy has to beat to be worth running."""
     return round((df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100, 2)
+
+
+def buy_and_hold_net(df: pd.DataFrame) -> float:
+    """
+    The same benchmark after paying to get in and out.
+
+    Every strategy is charged COST_PER_TRADE on each round trip while the
+    benchmark was quoted gross, which flattered it by exactly the cost of the
+    one round trip it also has to make. The gap is small over two years and
+    does not overturn the headline finding, but comparing a net number against
+    a gross one is not a fair test, so both are reported.
+    """
+    gross = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1)
+    return round((gross - COST_PER_TRADE) * 100, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +459,8 @@ INSTRUMENT_NAMES = {
 
 
 def comparison_report(symbol: str, period: str, df: pd.DataFrame,
-                      benchmark: float, ranked: list) -> dict:
+                      benchmark: float, ranked: list,
+                      net_benchmark: float | None = None) -> dict:
     """
     Build the results document in the shape make_charts.py reads.
 
@@ -413,6 +470,9 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
     only the committed copy — written by an earlier version of this script —
     still worked.
     """
+    if net_benchmark is None:
+        net_benchmark = round(benchmark - COST_PER_TRADE * 100, 2)
+
     return {
         "symbol": symbol,
         "instrument": INSTRUMENT_NAMES.get(symbol, symbol),
@@ -424,6 +484,7 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
         "commission_pct": round(COMMISSION_PCT * 100, 4),
         "slippage_pct": round(SLIPPAGE_PCT * 100, 4),
         "buy_and_hold_return_pct": benchmark,
+        "buy_and_hold_net_return_pct": net_benchmark,
         "ranking": [
             {
                 "rank": i,
@@ -443,6 +504,12 @@ def main() -> None:
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
     parser.add_argument("--period", default="2y", help="e.g. 1y, 2y, 5y")
     parser.add_argument("--out", default="results/comparison_local.json")
+    parser.add_argument("--fill", choices=("close", "next-bar"), default="close",
+                        help="bar the order fills on (default: close)")
+    parser.add_argument("--strategy", metavar="NAME", action="append",
+                        help="run only this strategy; repeatable")
+    parser.add_argument("--list-strategies", action="store_true",
+                        help="print the registered strategy ids and exit")
     parser.add_argument("--walk-forward", metavar="STRATEGY",
                         help="validate one strategy fold by fold, e.g. rsi")
     parser.add_argument("--splits", type=int, default=3,
@@ -450,6 +517,17 @@ def main() -> None:
     parser.add_argument("--train-ratio", type=float, default=0.7,
                         help="share of each fold used in sample (default 0.7)")
     args = parser.parse_args()
+
+    if args.list_strategies:
+        for key, (label, _) in STRATEGIES.items():
+            print(f"{key:<12}{label}")
+        return
+
+    chosen = args.strategy or list(STRATEGIES)
+    unknown = [k for k in chosen if k not in STRATEGIES]
+    if unknown:
+        parser.error(f"unknown strategy {unknown[0]!r}; "
+                     f"pick from {', '.join(STRATEGIES)}")
 
     df = load_prices(args.symbol, args.period)
 
@@ -475,14 +553,16 @@ def main() -> None:
         return
 
     benchmark = buy_and_hold(df)
+    net_benchmark = buy_and_hold_net(df)
 
     print(f"\n{args.symbol}  ·  {len(df)} daily candles  ·  "
           f"{df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Buy & hold: {benchmark}%\n")
+    print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after costs)\n")
 
     results = []
-    for key, (label, signal_fn) in STRATEGIES.items():
-        trades = extract_trades(df, signal_fn(df))
+    for key in chosen:
+        label, signal_fn = STRATEGIES[key]
+        trades = extract_trades(df, signal_fn(df), fill=args.fill)
         results.append((key, evaluate(label, trades)))
 
     results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
@@ -495,11 +575,12 @@ def main() -> None:
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
               f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
 
-    beat = [r.strategy for _, r in results if r.total_return_pct > benchmark]
+    beat = [r.strategy for _, r in results if r.total_return_pct > net_benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
 
     with open(args.out, "w") as f:
-        json.dump(comparison_report(args.symbol, args.period, df, benchmark, results),
+        json.dump(comparison_report(args.symbol, args.period, df, benchmark,
+                                    results, net_benchmark),
                   f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 
