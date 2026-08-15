@@ -22,6 +22,7 @@ from backtest import (
     bollinger_signals,
     comparison_report,
     buy_and_hold,
+    buy_and_hold_net,
     evaluate,
     extract_trades,
     fold_bounds,
@@ -369,3 +370,90 @@ class TestCommittedResults:
         committed = json.loads(path.read_text())
         for row in committed["ranking"]:
             assert row["strategy"] in STRATEGIES
+
+
+class TestScratchTrades:
+    def test_a_flat_trade_is_not_counted_as_a_loss(self):
+        result = evaluate("flat", [0.05, 0.0, -0.02])
+        assert result.scratch_trades == 1
+        # One win out of three; the scratch is neither side.
+        assert result.win_rate_pct == pytest.approx(33.3, abs=0.1)
+
+    def test_a_book_of_scratches_has_no_wins_or_losses(self):
+        result = evaluate("all flat", [0.0, 0.0])
+        assert result.scratch_trades == 2
+        assert result.win_rate_pct == 0.0
+
+    def test_scratches_do_not_change_gross_loss(self):
+        with_scratch = evaluate("a", [0.05, 0.0, -0.02])
+        without = evaluate("b", [0.05, -0.02])
+        assert with_scratch.profit_factor == without.profit_factor
+
+
+class TestSharpeRatio:
+    def test_is_positive_for_a_consistently_profitable_book(self):
+        assert evaluate("good", [0.04, 0.05, 0.03, 0.06]).sharpe_ratio > 0
+
+    def test_is_negative_for_a_losing_book(self):
+        assert evaluate("bad", [-0.04, -0.05, -0.03, -0.06]).sharpe_ratio < 0
+
+    def test_rewards_consistency_over_raw_return(self):
+        # Small but non-zero dispersion — identical returns are handled by the
+        # zero-variance case below, not here.
+        steady = evaluate("steady", [0.030, 0.028, 0.032, 0.029, 0.031])
+        lumpy = evaluate("lumpy", [0.20, -0.10, 0.15, -0.08, 0.05])
+        assert steady.sharpe_ratio > lumpy.sharpe_ratio
+
+    def test_is_zero_when_there_is_nothing_to_measure(self):
+        assert evaluate("empty", []).sharpe_ratio == 0.0
+        assert evaluate("one", [0.05]).sharpe_ratio == 0.0
+
+    def test_is_finite_for_identical_returns(self):
+        # Zero dispersion would divide by zero.
+        assert evaluate("identical", [0.02, 0.02, 0.02]).sharpe_ratio == 0.0
+
+
+class TestNetBenchmark:
+    def test_charges_one_round_trip_against_the_gross_figure(self):
+        df = frame([100.0, 109.3])
+        assert buy_and_hold(df) == 9.3
+        assert buy_and_hold_net(df) == pytest.approx(9.3 - COST_PER_TRADE * 100, abs=0.01)
+
+    def test_is_always_the_lower_of_the_two(self):
+        for closes in ([100.0, 130.0], [100.0, 90.0], [100.0, 100.0]):
+            df = frame(closes)
+            assert buy_and_hold_net(df) < buy_and_hold(df)
+
+    def test_appears_in_the_results_file(self):
+        assert "buy_and_hold_net_return_pct" in report_for()
+
+
+class TestFillMode:
+    def _frame_and_position(self):
+        df = frame([100.0, 100.0, 110.0, 120.0, 120.0])
+        return df, pd.Series([0, 1, 1, 0, 0], index=df.index)
+
+    def test_close_fill_uses_the_signal_bar(self):
+        df, pos = self._frame_and_position()
+        # Entered at bar 1 (100), exited at bar 3 (120).
+        assert extract_trades(df, pos)[0] == pytest.approx(0.20 - COST_PER_TRADE)
+
+    def test_next_bar_fill_uses_the_following_close(self):
+        df, pos = self._frame_and_position()
+        # Entry slips to bar 2 (110); the exit bar is the last actionable one.
+        assert extract_trades(df, pos, fill="next-bar")[0] == pytest.approx(
+            (120 - 110) / 110 - COST_PER_TRADE)
+
+    def test_default_is_unchanged(self):
+        df, pos = self._frame_and_position()
+        assert extract_trades(df, pos) == extract_trades(df, pos, fill="close")
+
+    def test_never_reads_past_the_last_bar(self):
+        df = frame([100.0, 100.0, 110.0])
+        pos = pd.Series([0, 1, 1], index=df.index)
+        assert len(extract_trades(df, pos, fill="next-bar")) == 1
+
+    def test_rejects_an_unknown_fill(self):
+        df, pos = self._frame_and_position()
+        with pytest.raises(ValueError):
+            extract_trades(df, pos, fill="tomorrow")
