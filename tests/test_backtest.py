@@ -18,6 +18,8 @@ import pytest
 
 from backtest import (
     INSTRUMENT_NAMES,
+    TRADING_DAYS_PER_YEAR,
+    trades_per_year,
     STRATEGIES,
     bollinger_signals,
     comparison_report,
@@ -509,3 +511,64 @@ def test_total_return_is_unchanged_by_the_leading_point():
     # The extra 1.0 is there for the peak, not for the arithmetic.
     result = evaluate("x", [0.10, 0.10])
     assert result.total_return_pct == pytest.approx(21.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Sharpe ratio
+# ---------------------------------------------------------------------------
+
+def test_sharpe_is_scaled_by_a_year_of_trades():
+    # One trade a week for a year, so about 52 of them.
+    assert trades_per_year(52, TRADING_DAYS_PER_YEAR) == pytest.approx(52.0)
+
+
+def test_trades_per_year_accounts_for_a_longer_history():
+    # The same 52 trades spread over two years is 26 a year.
+    assert trades_per_year(52, TRADING_DAYS_PER_YEAR * 2) == pytest.approx(26.0)
+
+
+def test_an_unknown_span_leaves_the_ratio_unannualised():
+    # Honestly per-trade, rather than multiplied by something meaningless.
+    for span in (None, 0, -10):
+        assert trades_per_year(100, span) == 1.0
+
+
+def test_trading_more_often_does_not_by_itself_raise_sharpe():
+    """
+    The regression. The ratio was scaled by sqrt(number of trades), which is
+    the sample size and not a span — so a strategy that traded more scored
+    higher whatever the trades were worth.
+    """
+    rng = np.random.default_rng(7)
+    span = TRADING_DAYS_PER_YEAR * 2
+
+    strong = list(rng.normal(0.02, 0.05, 20))
+    weak = list(rng.normal(0.004, 0.05, 400))
+
+    assert (
+        evaluate("few", strong, n_candles=span).sharpe_ratio
+        > evaluate("many", weak, n_candles=span).sharpe_ratio
+    )
+
+
+def test_the_same_edge_over_a_longer_span_scores_lower():
+    # Ten trades in one year is a better engine than ten in four.
+    trades = [0.03, -0.01] * 5
+    quick = evaluate("quick", trades, n_candles=TRADING_DAYS_PER_YEAR)
+    slow = evaluate("slow", trades, n_candles=TRADING_DAYS_PER_YEAR * 4)
+    assert quick.sharpe_ratio > slow.sharpe_ratio
+
+
+def test_a_losing_edge_stays_negative_however_it_is_scaled():
+    result = evaluate("x", [-0.02, -0.01, -0.03, 0.01], n_candles=TRADING_DAYS_PER_YEAR)
+    assert result.sharpe_ratio < 0
+
+
+def test_sharpe_is_zero_when_there_is_nothing_to_measure():
+    assert evaluate("x", [], n_candles=252).sharpe_ratio == 0.0
+    assert evaluate("x", [0.05], n_candles=252).sharpe_ratio == 0.0
+
+
+def test_sharpe_is_zero_when_every_trade_was_identical():
+    # No dispersion means no ratio, not a division by zero.
+    assert evaluate("x", [0.02, 0.02, 0.02], n_candles=252).sharpe_ratio == 0.0

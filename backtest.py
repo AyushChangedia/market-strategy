@@ -25,6 +25,10 @@ COMMISSION_PCT = 0.001   # 0.1% per trade
 SLIPPAGE_PCT = 0.0005    # 0.05% per trade
 COST_PER_TRADE = COMMISSION_PCT + SLIPPAGE_PCT
 
+# Daily bars, so a year of history is this many of them. Used to turn a
+# per-trade statistic into a per-year one.
+TRADING_DAYS_PER_YEAR = 252
+
 
 @dataclass
 class Result:
@@ -245,8 +249,30 @@ def extract_trades(df: pd.DataFrame, position: pd.Series,
     return trades
 
 
-def evaluate(name: str, trades: list) -> Result:
-    """Turn a list of trade returns into the metrics that matter."""
+def trades_per_year(n_trades: int, n_candles: Optional[int]) -> float:
+    """
+    How many trades this strategy takes in a year, at the pace observed.
+
+    Returns 1 when the span is unknown or unusable, which leaves a Sharpe
+    unannualised — a number that is honestly per-trade rather than one that
+    has been multiplied by something meaningless.
+    """
+    if not n_candles or n_candles <= 0:
+        return 1.0
+    years = n_candles / TRADING_DAYS_PER_YEAR
+    if years <= 0:
+        return 1.0
+    return n_trades / years
+
+
+def evaluate(name: str, trades: list, n_candles: Optional[int] = None) -> Result:
+    """
+    Turn a list of trade returns into the metrics that matter.
+
+    `n_candles` is how many daily bars the trades were taken over. It is what
+    turns a per-trade Sharpe into a per-year one; without it the ratio is
+    reported unannualised rather than annualised by the wrong thing.
+    """
     if not trades:
         return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
                       total_trades=0, scratch_trades=0, profit_factor=0.0,
@@ -273,13 +299,20 @@ def evaluate(name: str, trades: list) -> Result:
     peak = np.maximum.accumulate(equity)
     max_dd = ((equity - peak) / peak).min() * 100
 
-    # Sharpe over the trade sequence: mean return per trade against its own
-    # dispersion, annualised by the number of trades actually taken. Reported
-    # per-trade rather than per-day because the strategies hold for wildly
-    # different spans, so a daily series would be mostly zeroes.
+    # Sharpe: mean return per trade against its own dispersion, scaled to a
+    # year by how many trades a year actually contains.
+    #
+    # It was scaled by sqrt(number of trades), which is not annualisation —
+    # it is the sample size. That makes the ratio grow with trade count
+    # regardless of quality, so four hundred mediocre trades score higher than
+    # twenty good ones, and a strategy looks better the more often it trades.
+    # The fix needs to know how long the trades were taken over; with no span
+    # given the figure is left unannualised rather than annualised by the
+    # wrong quantity.
     sharpe = 0.0
     if len(arr) > 1 and arr.std(ddof=1) > 0:
-        sharpe = float(arr.mean() / arr.std(ddof=1) * np.sqrt(len(arr)))
+        per_trade = float(arr.mean() / arr.std(ddof=1))
+        sharpe = per_trade * np.sqrt(trades_per_year(len(arr), n_candles))
 
     return Result(
         strategy=name,
@@ -567,7 +600,7 @@ def main() -> None:
     for key in chosen:
         label, signal_fn = STRATEGIES[key]
         trades = extract_trades(df, signal_fn(df), fill=args.fill)
-        results.append((key, evaluate(label, trades)))
+        results.append((key, evaluate(label, trades, n_candles=len(df))))
 
     results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
 
