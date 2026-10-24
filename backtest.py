@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -598,6 +599,31 @@ INSTRUMENT_NAMES = {
 }
 
 
+def walk_forward_path(out: str, strategy: str) -> str:
+    """
+    Where a walk-forward report goes, given the --out meant for the comparison.
+
+    This was `out.replace("comparison_local", ...)`, which only renames the
+    one filename the project happens to ship with. Any other --out matched
+    nothing, the replace returned the string unchanged, and the walk-forward
+    report was written straight over the comparison results the same flag
+    names — silently, and with no way to tell afterwards which run produced
+    the file.
+
+    The name is now built from the path rather than found inside it, so the
+    two can never land on top of each other.
+    """
+    path = Path(out)
+    stem = path.stem
+    # Keep the project's own naming when it is the project's own file, so
+    # committed results and the chart generator still line up.
+    if "comparison" in stem:
+        stem = stem.replace("comparison", f"walk_forward_{strategy}")
+    else:
+        stem = f"{stem}_walk_forward_{strategy}"
+    return str(path.with_name(stem + (path.suffix or ".json")))
+
+
 def comparison_report(symbol: str, period: str, df: pd.DataFrame,
                       benchmark: float, ranked: list,
                       net_benchmark: float | None = None,
@@ -686,6 +712,12 @@ def main() -> None:
 
     df = load_prices(args.symbol, args.period)
 
+    # Resolved before either branch: --walk-forward reads it too, and having
+    # it below that branch made the flag crash outright.
+    cost = args.cost / 100
+    if cost < 0:
+        parser.error("--cost must not be negative")
+
     if args.walk_forward:
         report = walk_forward(df, args.walk_forward, args.splits,
                               args.train_ratio, cost=cost)
@@ -705,15 +737,11 @@ def main() -> None:
               f"{'ahead' if report['oos_beat_benchmark'] else 'behind'}")
         print(f"Robustness {report['robustness_score']}  ·  {report['verdict']}")
 
-        out = args.out.replace("comparison_local", f"walk_forward_{args.walk_forward}_local")
+        out = walk_forward_path(args.out, args.walk_forward)
         with open(out, "w") as f:
             json.dump(report, f, indent=2, allow_nan=False)
         print(f"Saved to {out}")
         return
-
-    cost = args.cost / 100
-    if cost < 0:
-        parser.error("--cost must not be negative")
 
     benchmark = buy_and_hold(df)
     net_benchmark = buy_and_hold_net(df, cost)
