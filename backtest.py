@@ -265,7 +265,11 @@ def evaluate(name: str, trades: list) -> Result:
     gross_loss = abs(losses.sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
 
-    equity = np.cumprod(1 + arr)
+    # The curve starts at 1, before the first trade. Without that leading
+    # point the running peak starts at the equity *after* trade one, so a
+    # strategy whose first trade loses 20% shows no drawdown for it at all —
+    # the worst stretch of a losing run is the one the report skips.
+    equity = np.concatenate(([1.0], np.cumprod(1 + arr)))
     peak = np.maximum.accumulate(equity)
     max_dd = ((equity - peak) / peak).min() * 100
 

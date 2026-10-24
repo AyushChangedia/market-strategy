@@ -457,3 +457,55 @@ class TestFillMode:
         df, pos = self._frame_and_position()
         with pytest.raises(ValueError):
             extract_trades(df, pos, fill="tomorrow")
+
+
+# ---------------------------------------------------------------------------
+# Maximum drawdown
+# ---------------------------------------------------------------------------
+
+def test_drawdown_counts_a_losing_first_trade():
+    """
+    The regression. The equity curve started at the value *after* the first
+    trade, so the running peak did too — a strategy whose opening trade lost
+    20% reported no drawdown for it at all, which is precisely the stretch a
+    reader is looking for.
+    """
+    assert evaluate("x", [-0.20]).max_drawdown_pct == -20.0
+
+
+def test_drawdown_of_an_opening_loss_that_is_never_recovered():
+    result = evaluate("x", [-0.20, 0.0, 0.0])
+    assert result.max_drawdown_pct == -20.0
+
+
+def test_drawdown_is_measured_from_the_running_peak():
+    # Up 30% from 0.9 is a new high, so the 25% that follows is measured
+    # against 1.17 rather than against the starting capital.
+    result = evaluate("x", [-0.10, 0.30, -0.25])
+    assert result.max_drawdown_pct == -25.0
+
+
+def test_a_strategy_that_never_loses_has_no_drawdown():
+    assert evaluate("x", [0.05, 0.05, 0.05]).max_drawdown_pct == 0.0
+
+
+def test_drawdown_is_the_worst_stretch_not_the_last_one():
+    result = evaluate("x", [-0.40, 2.0, -0.10])
+    assert result.max_drawdown_pct == -40.0
+
+
+def test_drawdown_compounds_across_consecutive_losses():
+    # Two 10% losses are 19%, not 20%.
+    result = evaluate("x", [-0.10, -0.10])
+    assert result.max_drawdown_pct == pytest.approx(-19.0, abs=0.01)
+
+
+def test_drawdown_is_never_positive():
+    for trades in ([0.1], [0.1, 0.2], [0.0], [-0.5, 1.0, 1.0]):
+        assert evaluate("x", trades).max_drawdown_pct <= 0.0
+
+
+def test_total_return_is_unchanged_by_the_leading_point():
+    # The extra 1.0 is there for the peak, not for the arithmetic.
+    result = evaluate("x", [0.10, 0.10])
+    assert result.total_return_pct == pytest.approx(21.0, abs=0.01)
