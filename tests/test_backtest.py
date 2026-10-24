@@ -679,3 +679,54 @@ def test_exposure_defaults_to_zero_when_no_position_is_given():
 def test_exposure_is_on_the_serialised_result():
     result = evaluate("x", [0.05], position=pd.Series([1, 1, 0, 0]))
     assert json.loads(json.dumps(asdict(result), allow_nan=False))["exposure_pct"] == 50.0
+
+
+# ---------------------------------------------------------------------------
+# CAGR
+# ---------------------------------------------------------------------------
+
+def test_a_years_return_is_its_own_annual_rate():
+    assert backtest.cagr(40, TRADING_DAYS_PER_YEAR) == pytest.approx(40.0, abs=0.01)
+
+
+def test_the_same_return_over_five_years_is_a_much_duller_one():
+    """
+    40% over one year and 40% over five were the same cell in the table, and
+    this project runs 1y, 2y and 5y periods from the same command.
+    """
+    assert backtest.cagr(40, TRADING_DAYS_PER_YEAR * 5) == pytest.approx(6.96, abs=0.01)
+
+
+def test_cagr_compounds_rather_than_dividing():
+    # 21% over two years is 10% a year, not 10.5%.
+    assert backtest.cagr(21, TRADING_DAYS_PER_YEAR * 2) == pytest.approx(10.0, abs=0.01)
+
+
+def test_a_loss_annualises_to_a_loss():
+    assert backtest.cagr(-19, TRADING_DAYS_PER_YEAR * 2) == pytest.approx(-10.0, abs=0.01)
+
+
+def test_losing_everything_has_no_annual_rate():
+    # The root of a negative number is not a figure to print.
+    assert backtest.cagr(-100, TRADING_DAYS_PER_YEAR) == 0.0
+    assert backtest.cagr(-150, TRADING_DAYS_PER_YEAR) == 0.0
+
+
+def test_an_unknown_span_gives_no_rate_rather_than_a_wrong_one():
+    for span in (None, 0, -5):
+        assert backtest.cagr(40, span) == 0.0
+
+
+def test_evaluate_carries_the_annual_rate():
+    result = evaluate("x", [0.21], n_candles=TRADING_DAYS_PER_YEAR * 2)
+    assert result.total_return_pct == pytest.approx(21.0, abs=0.01)
+    assert result.cagr_pct == pytest.approx(10.0, abs=0.01)
+
+
+def test_cagr_is_zero_when_there_were_no_trades():
+    assert evaluate("x", [], n_candles=TRADING_DAYS_PER_YEAR).cagr_pct == 0.0
+
+
+def test_cagr_is_on_the_serialised_result():
+    result = evaluate("x", [0.21], n_candles=TRADING_DAYS_PER_YEAR * 2)
+    assert "cagr_pct" in json.loads(json.dumps(asdict(result), allow_nan=False))

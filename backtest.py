@@ -48,6 +48,9 @@ class Result:
     # market a tenth of the time earned its return with a tenth of the
     # exposure, which the return alone does not say.
     exposure_pct: float = 0.0
+    # Annualised. A 40% total return means one thing over one year and
+    # something much duller over five, and the table never said which.
+    cagr_pct: float = 0.0
 
 
 def load_prices(symbol: str, period: str) -> pd.DataFrame:
@@ -269,6 +272,31 @@ def trades_per_year(n_trades: int, n_candles: Optional[int]) -> float:
     return n_trades / years
 
 
+def cagr(total_return_pct: float, n_candles: Optional[int]) -> float:
+    """
+    The compound annual growth rate behind a total return.
+
+    A total return cannot be compared across histories of different lengths,
+    and this project runs 1y, 2y and 5y periods from the same command. 40%
+    over one year and 40% over five are the same cell in the table and very
+    different results.
+
+    Returns 0 when the span is unknown, and when the strategy lost everything
+    — a total return of -100% has no annual rate, and the root of a negative
+    number is not a figure to print.
+    """
+    if not n_candles or n_candles <= 0:
+        return 0.0
+    years = n_candles / TRADING_DAYS_PER_YEAR
+    if years <= 0:
+        return 0.0
+
+    growth = 1 + total_return_pct / 100
+    if growth <= 0:
+        return 0.0
+    return round((growth ** (1 / years) - 1) * 100, 2)
+
+
 def exposure(position: pd.Series) -> float:
     """
     The share of the history spent holding something, as a percentage.
@@ -299,7 +327,7 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
         return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
                       total_trades=0, scratch_trades=0, profit_factor=0.0,
                       sharpe_ratio=0.0, max_drawdown_pct=0.0,
-                      expectancy_pct=0.0, exposure_pct=held)
+                      expectancy_pct=0.0, exposure_pct=held, cagr_pct=0.0)
 
     arr = np.array(trades)
     # A trade that came back exactly flat is neither a win nor a loss. Bundling
@@ -336,9 +364,11 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
         per_trade = float(arr.mean() / arr.std(ddof=1))
         sharpe = per_trade * np.sqrt(trades_per_year(len(arr), n_candles))
 
+    total_return_pct = round((equity[-1] - 1) * 100, 2)
+
     return Result(
         strategy=name,
-        total_return_pct=round((equity[-1] - 1) * 100, 2),
+        total_return_pct=total_return_pct,
         win_rate_pct=round(len(wins) / len(arr) * 100, 1),
         scratch_trades=scratches,
         total_trades=len(arr),
@@ -347,6 +377,7 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
         exposure_pct=held,
+        cagr_pct=cagr(total_return_pct, n_candles),
     )
 
 
@@ -643,14 +674,14 @@ def main() -> None:
     results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
 
     header = (f"{'Strategy':<34}{'Return':>9}{'Trades':>8}{'Win%':>8}"
-              f"{'PF':>7}{'MaxDD':>9}{'Held':>8}")
+              f"{'PF':>7}{'MaxDD':>9}{'Held':>8}{'CAGR':>9}")
     print(header)
     print("-" * len(header))
     for _, r in results:
         pf = "—" if r.profit_factor is None else f"{r.profit_factor}"
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
               f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%"
-              f"{r.exposure_pct:>7}%")
+              f"{r.exposure_pct:>7}%{r.cagr_pct:>8}%")
 
     beat = [r.strategy for _, r in results if r.total_return_pct > net_benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
