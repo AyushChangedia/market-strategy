@@ -845,3 +845,52 @@ def test_a_bigger_cost_can_turn_a_winning_strategy_into_a_losing_one():
     df, position = _two_trade_frame()
     assert backtest.extract_trades(df, position, cost=0.0)[0] > 0
     assert backtest.extract_trades(df, position, cost=0.5)[0] < 0
+
+
+# ---------------------------------------------------------------------------
+# What the saved report says about itself
+# ---------------------------------------------------------------------------
+
+def _tiny_report(**kwargs) -> dict:
+    df = pd.DataFrame(
+        {"Close": pd.Series([100.0, 110.0], index=pd.bdate_range("2024-01-01", periods=2))}
+    )
+    ranked = [("rsi", evaluate("RSI", [0.05], n_candles=2))]
+    return backtest.comparison_report("^NSEBANK", "1y", df, 10.0, ranked, **kwargs)
+
+
+def test_the_report_states_the_cost_its_figures_were_charged():
+    """
+    The report documented the module's default whatever --cost said, so a run
+    at a different assumption saved a file claiming numbers it had not
+    produced. A saved result outlives the command that made it; the
+    assumptions are the one thing it has to carry correctly.
+    """
+    assert _tiny_report(cost=0.004)["round_trip_cost_pct"] == pytest.approx(0.4)
+    assert _tiny_report(cost=0.0)["round_trip_cost_pct"] == 0.0
+
+
+def test_the_report_states_the_fill_assumption_too():
+    # Also not recoverable from the numbers afterwards.
+    assert _tiny_report(fill="next-bar")["fill"] == "next-bar"
+    assert _tiny_report()["fill"] == "close"
+
+
+def test_the_net_benchmark_follows_the_cost_it_was_given():
+    assert _tiny_report(cost=0.0)["buy_and_hold_net_return_pct"] == pytest.approx(10.0)
+    assert _tiny_report(cost=0.01)["buy_and_hold_net_return_pct"] == pytest.approx(9.0)
+
+
+def test_the_defaults_are_unchanged_so_published_figures_still_match():
+    report = _tiny_report()
+    assert report["round_trip_cost_pct"] == pytest.approx(backtest.COST_PER_TRADE * 100)
+
+
+def test_the_new_metrics_reach_the_saved_ranking():
+    row = _tiny_report()["ranking"][0]
+    for field in ("exposure_pct", "cagr_pct", "max_losing_streak", "sharpe_ratio"):
+        assert field in row, field
+
+
+def test_the_report_is_strict_json():
+    json.loads(json.dumps(_tiny_report(), allow_nan=False))

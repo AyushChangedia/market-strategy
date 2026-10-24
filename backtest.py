@@ -600,7 +600,9 @@ INSTRUMENT_NAMES = {
 
 def comparison_report(symbol: str, period: str, df: pd.DataFrame,
                       benchmark: float, ranked: list,
-                      net_benchmark: float | None = None) -> dict:
+                      net_benchmark: float | None = None,
+                      cost: float = COST_PER_TRADE,
+                      fill: str = "close") -> dict:
     """
     Build the results document in the shape make_charts.py reads.
 
@@ -611,7 +613,7 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
     still worked.
     """
     if net_benchmark is None:
-        net_benchmark = round(benchmark - COST_PER_TRADE * 100, 2)
+        net_benchmark = round(benchmark - cost * 100, 2)
 
     return {
         "symbol": symbol,
@@ -621,8 +623,17 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
         "candles_analyzed": len(df),
         "date_from": _day(df, 0),
         "date_to": _day(df, len(df) - 1),
+        # What the figures below were actually charged, not what the module
+        # defaults to. With --cost set, the report used to document an
+        # assumption none of its numbers were computed under — the one thing
+        # a saved result has to get right, because it outlives the command
+        # that produced it.
+        "round_trip_cost_pct": round(cost * 100, 4),
         "commission_pct": round(COMMISSION_PCT * 100, 4),
         "slippage_pct": round(SLIPPAGE_PCT * 100, 4),
+        # Which bar the orders were assumed to fill on. Also not recoverable
+        # from the numbers afterwards.
+        "fill": fill,
         "buy_and_hold_return_pct": benchmark,
         "buy_and_hold_net_return_pct": net_benchmark,
         "ranking": [
@@ -737,7 +748,8 @@ def main() -> None:
 
     with open(args.out, "w") as f:
         json.dump(comparison_report(args.symbol, args.period, df, benchmark,
-                                    results, net_benchmark),
+                                    results, net_benchmark, cost=cost,
+                                    fill=args.fill),
                   f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 
