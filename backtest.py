@@ -462,6 +462,8 @@ def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
     scores = [f.fold_robustness_score for f in folds]
     robustness = round(float(np.mean(scores)), 2)
     oos = np.cumprod([1 + f.test_return_pct / 100 for f in folds])
+    oos_return = round(float(oos[-1] - 1) * 100, 2)
+    net_benchmark = buy_and_hold_net(df)
 
     return {
         "symbol": None,
@@ -479,8 +481,16 @@ def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
         "robustness_score": robustness,
         "verdict": verdict_for(robustness),
         "oos_total_trades": sum(f.test_trades for f in folds),
-        "oos_total_return_pct": round(float(oos[-1] - 1) * 100, 2),
+        "oos_total_return_pct": oos_return,
+        # Net, because every fold return is net. The comparison the verdict
+        # rests on was a strategy charged for each round trip against a
+        # benchmark charged for none — the same mismatch the headline report
+        # already fixed, left standing here.
         "buy_and_hold_return_pct": buy_and_hold(df),
+        "buy_and_hold_net_return_pct": net_benchmark,
+        # The question the whole exercise exists to answer, against the
+        # benchmark charged the same way the strategy was.
+        "oos_beat_benchmark": bool(oos_return > net_benchmark),
         "folds": [asdict(f) for f in folds],
         "disclaimer": "Past performance does not guarantee future results. "
                       "Educational use only.",
@@ -581,7 +591,10 @@ def main() -> None:
         for f in report["folds"]:
             print(f"{f['fold']:<7}{f['train_return_pct']:>11}%"
                   f"{f['test_return_pct']:>15}%{f['fold_robustness_score']:>11}")
-        print(f"\nRobustness {report['robustness_score']}  ·  {report['verdict']}")
+        print(f"\nOut-of-sample {report['oos_total_return_pct']}%  ·  "
+              f"buy & hold {report['buy_and_hold_net_return_pct']}% after costs  ·  "
+              f"{'ahead' if report['oos_beat_benchmark'] else 'behind'}")
+        print(f"Robustness {report['robustness_score']}  ·  {report['verdict']}")
 
         out = args.out.replace("comparison_local", f"walk_forward_{args.walk_forward}_local")
         with open(out, "w") as f:

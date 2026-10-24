@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import backtest
+
 from backtest import (
     INSTRUMENT_NAMES,
     TRADING_DAYS_PER_YEAR,
@@ -572,3 +574,56 @@ def test_sharpe_is_zero_when_there_is_nothing_to_measure():
 def test_sharpe_is_zero_when_every_trade_was_identical():
     # No dispersion means no ratio, not a division by zero.
     assert evaluate("x", [0.02, 0.02, 0.02], n_candles=252).sharpe_ratio == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The walk-forward benchmark
+# ---------------------------------------------------------------------------
+
+def _trending_frame(n: int = 600, seed: int = 3) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    close = pd.Series(
+        100 * np.cumprod(1 + rng.normal(0.0004, 0.01, n)),
+        index=pd.bdate_range("2023-01-02", periods=n),
+    )
+    return pd.DataFrame(
+        {"Open": close, "High": close * 1.01, "Low": close * 0.99, "Close": close}
+    )
+
+
+def test_walk_forward_reports_the_benchmark_net_as_well_as_gross():
+    """
+    Every fold return is net of costs. The benchmark it was being read against
+    was gross, which is the same mismatch the headline report already fixed —
+    left standing in the one place the robustness verdict comes from.
+    """
+    report = backtest.walk_forward(_trending_frame(), "rsi")
+    assert "buy_and_hold_net_return_pct" in report
+    assert report["buy_and_hold_net_return_pct"] < report["buy_and_hold_return_pct"]
+
+
+def test_the_net_benchmark_is_lower_by_exactly_one_round_trip():
+    df = _trending_frame()
+    report = backtest.walk_forward(df, "rsi")
+    gap = report["buy_and_hold_return_pct"] - report["buy_and_hold_net_return_pct"]
+    assert gap == pytest.approx(backtest.COST_PER_TRADE * 100, abs=0.01)
+
+
+def test_walk_forward_says_whether_it_beat_the_benchmark():
+    report = backtest.walk_forward(_trending_frame(), "rsi")
+    assert report["oos_beat_benchmark"] == (
+        report["oos_total_return_pct"] > report["buy_and_hold_net_return_pct"]
+    )
+
+
+def test_the_verdict_is_judged_against_the_net_benchmark():
+    # Not the gross one. In a strong uptrend the difference is small, but a
+    # net number read against a gross one is not a fair test at any size.
+    report = backtest.walk_forward(_trending_frame(), "rsi")
+    assert isinstance(report["oos_beat_benchmark"], bool)
+
+
+def test_the_walk_forward_report_is_still_strict_json():
+    # numpy scalars and NaN both serialise in ways a strict parser rejects.
+    report = backtest.walk_forward(_trending_frame(), "rsi")
+    json.loads(json.dumps(report, allow_nan=False))
