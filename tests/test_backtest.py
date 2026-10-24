@@ -778,3 +778,70 @@ def test_the_streak_and_the_loss_count_agree_when_all_losses_are_consecutive():
     result = evaluate("x", trades, n_candles=TRADING_DAYS_PER_YEAR)
     losses = sum(1 for t in trades if t < 0)
     assert result.max_losing_streak == losses
+
+
+# ---------------------------------------------------------------------------
+# The cost assumption
+# ---------------------------------------------------------------------------
+
+def _two_trade_frame() -> tuple:
+    close = pd.Series([100.0, 100.0, 110.0, 110.0, 100.0, 100.0])
+    df = pd.DataFrame({"Close": close})
+    position = pd.Series([0, 1, 1, 0, 0, 0])
+    return df, position
+
+
+def test_the_default_cost_is_the_projects_own_assumption():
+    df, position = _two_trade_frame()
+    [trade] = backtest.extract_trades(df, position)
+    assert trade == pytest.approx(0.10 - backtest.COST_PER_TRADE, abs=1e-9)
+
+
+def test_a_higher_cost_eats_more_of_the_trade():
+    """
+    0.15% is reasonable for a liquid Indian index future and wrong for almost
+    anything else. A reader whose broker charges differently — or who wants to
+    know how much of an edge is really just this assumption — can say so.
+    """
+    df, position = _two_trade_frame()
+    [trade] = backtest.extract_trades(df, position, cost=0.01)
+    assert trade == pytest.approx(0.10 - 0.01, abs=1e-9)
+
+
+def test_a_cost_of_zero_is_the_gross_trade():
+    df, position = _two_trade_frame()
+    [trade] = backtest.extract_trades(df, position, cost=0.0)
+    assert trade == pytest.approx(0.10, abs=1e-9)
+
+
+def test_a_negative_cost_is_refused_rather_than_paying_you_to_trade():
+    df, position = _two_trade_frame()
+    with pytest.raises(ValueError, match="negative"):
+        backtest.extract_trades(df, position, cost=-0.01)
+
+
+def test_the_cost_applies_to_an_open_position_closed_at_the_end():
+    df = pd.DataFrame({"Close": pd.Series([100.0, 100.0, 110.0])})
+    position = pd.Series([0, 1, 1])
+    [trade] = backtest.extract_trades(df, position, cost=0.02)
+    assert trade == pytest.approx(0.10 - 0.02, abs=1e-9)
+
+
+def test_the_benchmark_is_charged_the_same_cost():
+    df = pd.DataFrame({"Close": pd.Series([100.0, 110.0])})
+    assert backtest.buy_and_hold_net(df, cost=0.02) == pytest.approx(8.0, abs=0.01)
+    assert backtest.buy_and_hold_net(df, cost=0.0) == pytest.approx(10.0, abs=0.01)
+
+
+def test_walk_forward_charges_the_benchmark_what_it_was_told():
+    df = _trending_frame()
+    cheap = backtest.walk_forward(df, "rsi", cost=0.0)
+    dear = backtest.walk_forward(df, "rsi", cost=0.05)
+    assert dear["buy_and_hold_net_return_pct"] < cheap["buy_and_hold_net_return_pct"]
+
+
+def test_a_bigger_cost_can_turn_a_winning_strategy_into_a_losing_one():
+    # Which is the point of being able to set it.
+    df, position = _two_trade_frame()
+    assert backtest.extract_trades(df, position, cost=0.0)[0] > 0
+    assert backtest.extract_trades(df, position, cost=0.5)[0] < 0

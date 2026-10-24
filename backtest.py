@@ -213,7 +213,7 @@ STRATEGIES = {
 # ---------------------------------------------------------------------------
 
 def extract_trades(df: pd.DataFrame, position: pd.Series,
-                   fill: str = "close") -> list:
+                   fill: str = "close", cost: float = COST_PER_TRADE) -> list:
     """
     Walk the position series and return each completed trade's net return.
 
@@ -226,11 +226,20 @@ def extract_trades(df: pd.DataFrame, position: pd.Series,
       "next-bar"  the following bar's close, which is the earliest price you
                   could actually have acted on.
 
-    The default is unchanged so published figures stay reproducible; pass
+    `cost` is what a round trip costs, as a fraction — commission plus
+    slippage. It defaults to this project's own assumption, 0.15%, which is
+    reasonable for a liquid Indian index future and wrong for almost anything
+    else. A reader whose broker charges differently, or who wants to know how
+    much of an edge is really just a cost assumption, can say so.
+
+    The defaults are unchanged so published figures stay reproducible; pass
     "next-bar" to see how much of an edge survives a realistic fill.
     """
     if fill not in ("close", "next-bar"):
         raise ValueError(f"fill must be 'close' or 'next-bar', got {fill!r}")
+
+    if cost < 0:
+        raise ValueError(f"cost must not be negative, got {cost!r}")
 
     step = 1 if fill == "next-bar" else 0
     last = len(df) - 1
@@ -248,13 +257,13 @@ def extract_trades(df: pd.DataFrame, position: pd.Series,
         elif not was_flat and not now_long and entry_price is not None:
             exit_price = price_at(i)
             gross = (exit_price - entry_price) / entry_price
-            trades.append(gross - COST_PER_TRADE)   # costs on every trade
+            trades.append(gross - cost)   # costs on every round trip
             entry_price = None
 
     # close any open position at the final bar
     if entry_price is not None:
         gross = (df["Close"].iloc[-1] - entry_price) / entry_price
-        trades.append(gross - COST_PER_TRADE)
+        trades.append(gross - cost)
 
     return trades
 
@@ -415,7 +424,7 @@ def buy_and_hold(df: pd.DataFrame) -> float:
     return round((df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100, 2)
 
 
-def buy_and_hold_net(df: pd.DataFrame) -> float:
+def buy_and_hold_net(df: pd.DataFrame, cost: float = COST_PER_TRADE) -> float:
     """
     The same benchmark after paying to get in and out.
 
@@ -426,7 +435,7 @@ def buy_and_hold_net(df: pd.DataFrame) -> float:
     a gross one is not a fair test, so both are reported.
     """
     gross = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1)
-    return round((gross - COST_PER_TRADE) * 100, 2)
+    return round((gross - cost) * 100, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +529,8 @@ def _day(df: pd.DataFrame, i: int) -> str:
 
 
 def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
-                 n_splits: int = 3, train_ratio: float = 0.7) -> dict:
+                 n_splits: int = 3, train_ratio: float = 0.7,
+                 cost: float = COST_PER_TRADE) -> dict:
     """Run one strategy fold by fold and report how well it held up."""
     if strategy not in STRATEGIES:
         raise KeyError(f"unknown strategy {strategy!r}; pick one of {sorted(STRATEGIES)}")
@@ -546,7 +556,7 @@ def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
     robustness = round(float(np.mean(scores)), 2)
     oos = np.cumprod([1 + f.test_return_pct / 100 for f in folds])
     oos_return = round(float(oos[-1] - 1) * 100, 2)
-    net_benchmark = buy_and_hold_net(df)
+    net_benchmark = buy_and_hold_net(df, cost)
 
     return {
         "symbol": None,
@@ -634,6 +644,10 @@ def main() -> None:
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
     parser.add_argument("--period", default="2y", help="e.g. 1y, 2y, 5y")
     parser.add_argument("--out", default="results/comparison_local.json")
+    parser.add_argument("--cost", type=float, default=COST_PER_TRADE * 100,
+                        metavar="PCT",
+                        help="round-trip cost in percent (default: %(default)s, "
+                             "which is 0.1%% commission plus 0.05%% slippage)")
     parser.add_argument("--fill", choices=("close", "next-bar"), default="close",
                         help="bar the order fills on (default: close)")
     parser.add_argument("--strategy", metavar="NAME", action="append",
@@ -662,7 +676,8 @@ def main() -> None:
     df = load_prices(args.symbol, args.period)
 
     if args.walk_forward:
-        report = walk_forward(df, args.walk_forward, args.splits, args.train_ratio)
+        report = walk_forward(df, args.walk_forward, args.splits,
+                              args.train_ratio, cost=cost)
         report["symbol"] = args.symbol
         report["period"] = args.period
 
@@ -685,18 +700,23 @@ def main() -> None:
         print(f"Saved to {out}")
         return
 
+    cost = args.cost / 100
+    if cost < 0:
+        parser.error("--cost must not be negative")
+
     benchmark = buy_and_hold(df)
-    net_benchmark = buy_and_hold_net(df)
+    net_benchmark = buy_and_hold_net(df, cost)
 
     print(f"\n{args.symbol}  ·  {len(df)} daily candles  ·  "
           f"{df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after costs)\n")
+    print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after "
+          f"{args.cost}% round-trip costs)\n")
 
     results = []
     for key in chosen:
         label, signal_fn = STRATEGIES[key]
         position = signal_fn(df)
-        trades = extract_trades(df, position, fill=args.fill)
+        trades = extract_trades(df, position, fill=args.fill, cost=cost)
         results.append((key, evaluate(label, trades, n_candles=len(df),
                                       position=position)))
 
