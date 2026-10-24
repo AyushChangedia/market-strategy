@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -24,6 +25,10 @@ import pandas as pd
 COMMISSION_PCT = 0.001   # 0.1% per trade
 SLIPPAGE_PCT = 0.0005    # 0.05% per trade
 COST_PER_TRADE = COMMISSION_PCT + SLIPPAGE_PCT
+
+# Daily bars, so a year of history is this many of them. Used to turn a
+# per-trade statistic into a per-year one.
+TRADING_DAYS_PER_YEAR = 252
 
 
 @dataclass
@@ -40,6 +45,16 @@ class Result:
     sharpe_ratio: float
     max_drawdown_pct: float
     expectancy_pct: float
+    # Share of the history actually spent holding something. A strategy in the
+    # market a tenth of the time earned its return with a tenth of the
+    # exposure, which the return alone does not say.
+    exposure_pct: float = 0.0
+    # Annualised. A 40% total return means one thing over one year and
+    # something much duller over five, and the table never said which.
+    cagr_pct: float = 0.0
+    # The run of losses a trader would have had to sit through. Max drawdown
+    # says how deep the hole was; this says how long they were in it.
+    max_losing_streak: int = 0
 
 
 def load_prices(symbol: str, period: str) -> pd.DataFrame:
@@ -199,7 +214,7 @@ STRATEGIES = {
 # ---------------------------------------------------------------------------
 
 def extract_trades(df: pd.DataFrame, position: pd.Series,
-                   fill: str = "close") -> list:
+                   fill: str = "close", cost: float = COST_PER_TRADE) -> list:
     """
     Walk the position series and return each completed trade's net return.
 
@@ -212,11 +227,20 @@ def extract_trades(df: pd.DataFrame, position: pd.Series,
       "next-bar"  the following bar's close, which is the earliest price you
                   could actually have acted on.
 
-    The default is unchanged so published figures stay reproducible; pass
+    `cost` is what a round trip costs, as a fraction — commission plus
+    slippage. It defaults to this project's own assumption, 0.15%, which is
+    reasonable for a liquid Indian index future and wrong for almost anything
+    else. A reader whose broker charges differently, or who wants to know how
+    much of an edge is really just a cost assumption, can say so.
+
+    The defaults are unchanged so published figures stay reproducible; pass
     "next-bar" to see how much of an edge survives a realistic fill.
     """
     if fill not in ("close", "next-bar"):
         raise ValueError(f"fill must be 'close' or 'next-bar', got {fill!r}")
+
+    if cost < 0:
+        raise ValueError(f"cost must not be negative, got {cost!r}")
 
     step = 1 if fill == "next-bar" else 0
     last = len(df) - 1
@@ -234,24 +258,114 @@ def extract_trades(df: pd.DataFrame, position: pd.Series,
         elif not was_flat and not now_long and entry_price is not None:
             exit_price = price_at(i)
             gross = (exit_price - entry_price) / entry_price
-            trades.append(gross - COST_PER_TRADE)   # costs on every trade
+            trades.append(gross - cost)   # costs on every round trip
             entry_price = None
 
     # close any open position at the final bar
     if entry_price is not None:
         gross = (df["Close"].iloc[-1] - entry_price) / entry_price
-        trades.append(gross - COST_PER_TRADE)
+        trades.append(gross - cost)
 
     return trades
 
 
-def evaluate(name: str, trades: list) -> Result:
-    """Turn a list of trade returns into the metrics that matter."""
+def trades_per_year(n_trades: int, n_candles: Optional[int]) -> float:
+    """
+    How many trades this strategy takes in a year, at the pace observed.
+
+    Returns 1 when the span is unknown or unusable, which leaves a Sharpe
+    unannualised — a number that is honestly per-trade rather than one that
+    has been multiplied by something meaningless.
+    """
+    if not n_candles or n_candles <= 0:
+        return 1.0
+    years = n_candles / TRADING_DAYS_PER_YEAR
+    if years <= 0:
+        return 1.0
+    return n_trades / years
+
+
+def max_losing_streak(trades) -> int:
+    """
+    The longest run of consecutive losing trades.
+
+    The figure that decides whether a strategy is survivable in practice
+    rather than on paper. Maximum drawdown says how deep the hole was; this
+    says how many losses in a row a person had to keep taking the next signal
+    through. Nine is the point at which most people stop following the rules,
+    whatever the backtest says happens afterwards.
+
+    A scratch trade breaks the run. It cost nothing, and a flat result is not
+    another loss to sit through.
+    """
+    longest = 0
+    current = 0
+    for trade in trades or []:
+        if trade < 0:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def cagr(total_return_pct: float, n_candles: Optional[int]) -> float:
+    """
+    The compound annual growth rate behind a total return.
+
+    A total return cannot be compared across histories of different lengths,
+    and this project runs 1y, 2y and 5y periods from the same command. 40%
+    over one year and 40% over five are the same cell in the table and very
+    different results.
+
+    Returns 0 when the span is unknown, and when the strategy lost everything
+    — a total return of -100% has no annual rate, and the root of a negative
+    number is not a figure to print.
+    """
+    if not n_candles or n_candles <= 0:
+        return 0.0
+    years = n_candles / TRADING_DAYS_PER_YEAR
+    if years <= 0:
+        return 0.0
+
+    growth = 1 + total_return_pct / 100
+    if growth <= 0:
+        return 0.0
+    return round((growth ** (1 / years) - 1) * 100, 2)
+
+
+def exposure(position: pd.Series) -> float:
+    """
+    The share of the history spent holding something, as a percentage.
+
+    The missing half of every return in this report. A strategy that returned
+    8% while in the market a tenth of the time and one that returned 8% while
+    always in it are not the same strategy — the first left nine tenths of the
+    period free and took a tenth of the risk to get there. Comparing them on
+    return alone silently prefers the one that was simply exposed for longer.
+    """
+    if position is None or len(position) == 0:
+        return 0.0
+    return round(float((position == 1).sum()) / len(position) * 100, 1)
+
+
+def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
+             position: Optional[pd.Series] = None) -> Result:
+    """
+    Turn a list of trade returns into the metrics that matter.
+
+    `n_candles` is how many daily bars the trades were taken over. It is what
+    turns a per-trade Sharpe into a per-year one; without it the ratio is
+    reported unannualised rather than annualised by the wrong thing.
+    """
+    held = 0.0 if position is None else exposure(position)
+
     if not trades:
         return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
                       total_trades=0, scratch_trades=0, profit_factor=0.0,
                       sharpe_ratio=0.0, max_drawdown_pct=0.0,
-                      expectancy_pct=0.0)
+                      expectancy_pct=0.0, exposure_pct=held, cagr_pct=0.0,
+                      max_losing_streak=0)
 
     arr = np.array(trades)
     # A trade that came back exactly flat is neither a win nor a loss. Bundling
@@ -265,21 +379,34 @@ def evaluate(name: str, trades: list) -> Result:
     gross_loss = abs(losses.sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
 
-    equity = np.cumprod(1 + arr)
+    # The curve starts at 1, before the first trade. Without that leading
+    # point the running peak starts at the equity *after* trade one, so a
+    # strategy whose first trade loses 20% shows no drawdown for it at all —
+    # the worst stretch of a losing run is the one the report skips.
+    equity = np.concatenate(([1.0], np.cumprod(1 + arr)))
     peak = np.maximum.accumulate(equity)
     max_dd = ((equity - peak) / peak).min() * 100
 
-    # Sharpe over the trade sequence: mean return per trade against its own
-    # dispersion, annualised by the number of trades actually taken. Reported
-    # per-trade rather than per-day because the strategies hold for wildly
-    # different spans, so a daily series would be mostly zeroes.
+    # Sharpe: mean return per trade against its own dispersion, scaled to a
+    # year by how many trades a year actually contains.
+    #
+    # It was scaled by sqrt(number of trades), which is not annualisation —
+    # it is the sample size. That makes the ratio grow with trade count
+    # regardless of quality, so four hundred mediocre trades score higher than
+    # twenty good ones, and a strategy looks better the more often it trades.
+    # The fix needs to know how long the trades were taken over; with no span
+    # given the figure is left unannualised rather than annualised by the
+    # wrong quantity.
     sharpe = 0.0
     if len(arr) > 1 and arr.std(ddof=1) > 0:
-        sharpe = float(arr.mean() / arr.std(ddof=1) * np.sqrt(len(arr)))
+        per_trade = float(arr.mean() / arr.std(ddof=1))
+        sharpe = per_trade * np.sqrt(trades_per_year(len(arr), n_candles))
+
+    total_return_pct = round((equity[-1] - 1) * 100, 2)
 
     return Result(
         strategy=name,
-        total_return_pct=round((equity[-1] - 1) * 100, 2),
+        total_return_pct=total_return_pct,
         win_rate_pct=round(len(wins) / len(arr) * 100, 1),
         scratch_trades=scratches,
         total_trades=len(arr),
@@ -287,6 +414,9 @@ def evaluate(name: str, trades: list) -> Result:
         sharpe_ratio=round(sharpe, 2),
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
+        exposure_pct=held,
+        cagr_pct=cagr(total_return_pct, n_candles),
+        max_losing_streak=max_losing_streak(trades),
     )
 
 
@@ -295,7 +425,7 @@ def buy_and_hold(df: pd.DataFrame) -> float:
     return round((df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100, 2)
 
 
-def buy_and_hold_net(df: pd.DataFrame) -> float:
+def buy_and_hold_net(df: pd.DataFrame, cost: float = COST_PER_TRADE) -> float:
     """
     The same benchmark after paying to get in and out.
 
@@ -306,7 +436,7 @@ def buy_and_hold_net(df: pd.DataFrame) -> float:
     a gross one is not a fair test, so both are reported.
     """
     gross = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1)
-    return round((gross - COST_PER_TRADE) * 100, 2)
+    return round((gross - cost) * 100, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +530,8 @@ def _day(df: pd.DataFrame, i: int) -> str:
 
 
 def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
-                 n_splits: int = 3, train_ratio: float = 0.7) -> dict:
+                 n_splits: int = 3, train_ratio: float = 0.7,
+                 cost: float = COST_PER_TRADE) -> dict:
     """Run one strategy fold by fold and report how well it held up."""
     if strategy not in STRATEGIES:
         raise KeyError(f"unknown strategy {strategy!r}; pick one of {sorted(STRATEGIES)}")
@@ -425,6 +556,8 @@ def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
     scores = [f.fold_robustness_score for f in folds]
     robustness = round(float(np.mean(scores)), 2)
     oos = np.cumprod([1 + f.test_return_pct / 100 for f in folds])
+    oos_return = round(float(oos[-1] - 1) * 100, 2)
+    net_benchmark = buy_and_hold_net(df, cost)
 
     return {
         "symbol": None,
@@ -442,8 +575,16 @@ def walk_forward(df: pd.DataFrame, strategy: str = "rsi",
         "robustness_score": robustness,
         "verdict": verdict_for(robustness),
         "oos_total_trades": sum(f.test_trades for f in folds),
-        "oos_total_return_pct": round(float(oos[-1] - 1) * 100, 2),
+        "oos_total_return_pct": oos_return,
+        # Net, because every fold return is net. The comparison the verdict
+        # rests on was a strategy charged for each round trip against a
+        # benchmark charged for none — the same mismatch the headline report
+        # already fixed, left standing here.
         "buy_and_hold_return_pct": buy_and_hold(df),
+        "buy_and_hold_net_return_pct": net_benchmark,
+        # The question the whole exercise exists to answer, against the
+        # benchmark charged the same way the strategy was.
+        "oos_beat_benchmark": bool(oos_return > net_benchmark),
         "folds": [asdict(f) for f in folds],
         "disclaimer": "Past performance does not guarantee future results. "
                       "Educational use only.",
@@ -458,9 +599,36 @@ INSTRUMENT_NAMES = {
 }
 
 
+def walk_forward_path(out: str, strategy: str) -> str:
+    """
+    Where a walk-forward report goes, given the --out meant for the comparison.
+
+    This was `out.replace("comparison_local", ...)`, which only renames the
+    one filename the project happens to ship with. Any other --out matched
+    nothing, the replace returned the string unchanged, and the walk-forward
+    report was written straight over the comparison results the same flag
+    names — silently, and with no way to tell afterwards which run produced
+    the file.
+
+    The name is now built from the path rather than found inside it, so the
+    two can never land on top of each other.
+    """
+    path = Path(out)
+    stem = path.stem
+    # Keep the project's own naming when it is the project's own file, so
+    # committed results and the chart generator still line up.
+    if "comparison" in stem:
+        stem = stem.replace("comparison", f"walk_forward_{strategy}")
+    else:
+        stem = f"{stem}_walk_forward_{strategy}"
+    return str(path.with_name(stem + (path.suffix or ".json")))
+
+
 def comparison_report(symbol: str, period: str, df: pd.DataFrame,
                       benchmark: float, ranked: list,
-                      net_benchmark: float | None = None) -> dict:
+                      net_benchmark: float | None = None,
+                      cost: float = COST_PER_TRADE,
+                      fill: str = "close") -> dict:
     """
     Build the results document in the shape make_charts.py reads.
 
@@ -471,7 +639,7 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
     still worked.
     """
     if net_benchmark is None:
-        net_benchmark = round(benchmark - COST_PER_TRADE * 100, 2)
+        net_benchmark = round(benchmark - cost * 100, 2)
 
     return {
         "symbol": symbol,
@@ -481,8 +649,17 @@ def comparison_report(symbol: str, period: str, df: pd.DataFrame,
         "candles_analyzed": len(df),
         "date_from": _day(df, 0),
         "date_to": _day(df, len(df) - 1),
+        # What the figures below were actually charged, not what the module
+        # defaults to. With --cost set, the report used to document an
+        # assumption none of its numbers were computed under — the one thing
+        # a saved result has to get right, because it outlives the command
+        # that produced it.
+        "round_trip_cost_pct": round(cost * 100, 4),
         "commission_pct": round(COMMISSION_PCT * 100, 4),
         "slippage_pct": round(SLIPPAGE_PCT * 100, 4),
+        # Which bar the orders were assumed to fill on. Also not recoverable
+        # from the numbers afterwards.
+        "fill": fill,
         "buy_and_hold_return_pct": benchmark,
         "buy_and_hold_net_return_pct": net_benchmark,
         "ranking": [
@@ -504,6 +681,10 @@ def main() -> None:
     parser.add_argument("--symbol", default="^NSEBANK", help="Yahoo Finance ticker")
     parser.add_argument("--period", default="2y", help="e.g. 1y, 2y, 5y")
     parser.add_argument("--out", default="results/comparison_local.json")
+    parser.add_argument("--cost", type=float, default=COST_PER_TRADE * 100,
+                        metavar="PCT",
+                        help="round-trip cost in percent (default: %(default)s, "
+                             "which is 0.1%% commission plus 0.05%% slippage)")
     parser.add_argument("--fill", choices=("close", "next-bar"), default="close",
                         help="bar the order fills on (default: close)")
     parser.add_argument("--strategy", metavar="NAME", action="append",
@@ -531,8 +712,15 @@ def main() -> None:
 
     df = load_prices(args.symbol, args.period)
 
+    # Resolved before either branch: --walk-forward reads it too, and having
+    # it below that branch made the flag crash outright.
+    cost = args.cost / 100
+    if cost < 0:
+        parser.error("--cost must not be negative")
+
     if args.walk_forward:
-        report = walk_forward(df, args.walk_forward, args.splits, args.train_ratio)
+        report = walk_forward(df, args.walk_forward, args.splits,
+                              args.train_ratio, cost=cost)
         report["symbol"] = args.symbol
         report["period"] = args.period
 
@@ -544,43 +732,52 @@ def main() -> None:
         for f in report["folds"]:
             print(f"{f['fold']:<7}{f['train_return_pct']:>11}%"
                   f"{f['test_return_pct']:>15}%{f['fold_robustness_score']:>11}")
-        print(f"\nRobustness {report['robustness_score']}  ·  {report['verdict']}")
+        print(f"\nOut-of-sample {report['oos_total_return_pct']}%  ·  "
+              f"buy & hold {report['buy_and_hold_net_return_pct']}% after costs  ·  "
+              f"{'ahead' if report['oos_beat_benchmark'] else 'behind'}")
+        print(f"Robustness {report['robustness_score']}  ·  {report['verdict']}")
 
-        out = args.out.replace("comparison_local", f"walk_forward_{args.walk_forward}_local")
+        out = walk_forward_path(args.out, args.walk_forward)
         with open(out, "w") as f:
             json.dump(report, f, indent=2, allow_nan=False)
         print(f"Saved to {out}")
         return
 
     benchmark = buy_and_hold(df)
-    net_benchmark = buy_and_hold_net(df)
+    net_benchmark = buy_and_hold_net(df, cost)
 
     print(f"\n{args.symbol}  ·  {len(df)} daily candles  ·  "
           f"{df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after costs)\n")
+    print(f"Buy & hold: {benchmark}%  ({net_benchmark}% after "
+          f"{args.cost}% round-trip costs)\n")
 
     results = []
     for key in chosen:
         label, signal_fn = STRATEGIES[key]
-        trades = extract_trades(df, signal_fn(df), fill=args.fill)
-        results.append((key, evaluate(label, trades)))
+        position = signal_fn(df)
+        trades = extract_trades(df, position, fill=args.fill, cost=cost)
+        results.append((key, evaluate(label, trades, n_candles=len(df),
+                                      position=position)))
 
     results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
 
-    header = f"{'Strategy':<34}{'Return':>9}{'Trades':>8}{'Win%':>8}{'PF':>7}{'MaxDD':>9}"
+    header = (f"{'Strategy':<34}{'Return':>9}{'Trades':>8}{'Win%':>8}"
+              f"{'PF':>7}{'MaxDD':>9}{'Held':>8}{'CAGR':>9}")
     print(header)
     print("-" * len(header))
     for _, r in results:
         pf = "—" if r.profit_factor is None else f"{r.profit_factor}"
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
-              f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
+              f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%"
+              f"{r.exposure_pct:>7}%{r.cagr_pct:>8}%")
 
     beat = [r.strategy for _, r in results if r.total_return_pct > net_benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")
 
     with open(args.out, "w") as f:
         json.dump(comparison_report(args.symbol, args.period, df, benchmark,
-                                    results, net_benchmark),
+                                    results, net_benchmark, cost=cost,
+                                    fill=args.fill),
                   f, indent=2, allow_nan=False)
     print(f"Saved to {args.out}")
 

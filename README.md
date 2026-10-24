@@ -129,6 +129,42 @@ count instead of leading with win rate, and why every trade here is charged
 0.1% commission plus 0.05% slippage. Costs are not a footnote to a strategy.
 They are frequently the entire result.
 
+**What each column answers**
+
+| Column | The question it settles |
+|---|---|
+| Return | What the whole run made |
+| CAGR | …per year, so a 1y and a 5y run can be compared at all |
+| Trades | How many bites it took to get there |
+| Win% | How often it was right — the number that misleads first |
+| PF | Gross profit over gross loss. Under 1 and it lost |
+| MaxDD | How deep the worst hole was |
+| Held | What share of the period it was exposed for |
+| Sharpe | Return per unit of its own volatility, scaled to a year |
+| Longest losing run | How many losses in a row somebody had to sit through |
+
+The last two are the ones most often got wrong, including here.
+
+Sharpe was being scaled by the square root of the *number of trades*, which is
+the sample size and not a span — so it rose with trade frequency regardless of
+quality, and four hundred mediocre trades outranked twenty good ones. It is
+scaled by a year of trading at the observed pace now.
+
+Maximum drawdown was measured from the equity after the first trade, so a
+strategy whose opening trade lost 20% reported no drawdown at all. The worst
+stretch of a losing run was precisely the one the report skipped.
+
+Exposure answers a question return alone cannot: a strategy that made 8% while
+in the market a tenth of the time and one that made 8% while always in it are
+not the same strategy, and comparing on return silently prefers whichever was
+exposed for longer.
+
+The longest losing run is the figure that decides whether something is
+survivable in practice. Drawdown says how deep the hole was; this says how
+many losses in a row a person had to keep taking the next signal through. Nine
+is roughly where most people stop following the rules, whatever the backtest
+says happens on the tenth.
+
 ---
 
 ## Running it
@@ -152,6 +188,8 @@ Any Yahoo Finance ticker works: `^NSEBANK`, `^NSEI`, `RELIANCE.NS`, `TCS.NS`.
 python backtest.py --walk-forward rsi           # fold-by-fold, the Finding 3 run
 python backtest.py --walk-forward rsi --splits 4 --train-ratio 0.6
 python backtest.py --fill next-bar              # how much edge survives a real fill
+python backtest.py --cost 0                     # the gross edge, before fees
+python backtest.py --cost 0.3                   # a less friendly broker
 ```
 
 `--fill` decides which bar an order executes on. The default, `close`, books
@@ -159,12 +197,19 @@ the trade at the same close that produced the signal — convenient, and slightl
 generous. `next-bar` books it at the following close, the earliest price you
 could actually have acted on. Every published figure here uses the default.
 
+`--cost` is the round-trip cost in percent, defaulting to the 0.15% used
+throughout. It is worth arguing with: the difference between an edge and a
+rounding error is often exactly the fee, and the default is reasonable for a
+liquid Indian index future and wrong for almost anything else. Every saved
+report records the cost and fill mode its own figures were computed under,
+since neither can be recovered from the numbers afterwards.
+
 **Figures and tests**
 
 ```bash
 python make_charts.py                           # regenerate the three charts
 python make_banner.py                           # regenerate the README banner
-pip install -r requirements-dev.txt && pytest -q # 67 offline tests
+pip install -r requirements-dev.txt && pytest -q # 141 offline tests
 ```
 
 The charts read `results/*.json`, so they never re-fetch data. The test suite
