@@ -730,3 +730,51 @@ def test_cagr_is_zero_when_there_were_no_trades():
 def test_cagr_is_on_the_serialised_result():
     result = evaluate("x", [0.21], n_candles=TRADING_DAYS_PER_YEAR * 2)
     assert "cagr_pct" in json.loads(json.dumps(asdict(result), allow_nan=False))
+
+
+# ---------------------------------------------------------------------------
+# The longest losing streak
+# ---------------------------------------------------------------------------
+
+def test_the_longest_run_of_losses_is_counted():
+    assert backtest.max_losing_streak([-0.01, -0.01, 0.05, -0.01]) == 2
+
+
+def test_the_longest_run_not_the_last_one():
+    assert backtest.max_losing_streak([-0.01] * 5 + [0.10] + [-0.01] * 2) == 5
+
+
+def test_a_winner_breaks_the_run():
+    assert backtest.max_losing_streak([-0.01, 0.01, -0.01, 0.01, -0.01]) == 1
+
+
+def test_a_scratch_trade_breaks_the_run_too():
+    # It cost nothing. A flat result is not another loss to sit through.
+    assert backtest.max_losing_streak([-0.01, 0.0, -0.01]) == 1
+
+
+def test_a_strategy_that_never_loses_has_no_streak():
+    assert backtest.max_losing_streak([0.01, 0.02, 0.0]) == 0
+    assert backtest.max_losing_streak([]) == 0
+    assert backtest.max_losing_streak(None) == 0
+
+
+def test_every_trade_losing_is_the_whole_run():
+    assert backtest.max_losing_streak([-0.01] * 9) == 9
+
+
+def test_the_streak_is_on_the_result():
+    """
+    The figure that decides whether a strategy is survivable in practice
+    rather than on paper. Drawdown says how deep the hole was; this says how
+    many losses in a row somebody had to keep taking the next signal through.
+    """
+    result = evaluate("x", [-0.02, -0.02, -0.02, 0.10], n_candles=TRADING_DAYS_PER_YEAR)
+    assert result.max_losing_streak == 3
+
+
+def test_the_streak_and_the_loss_count_agree_when_all_losses_are_consecutive():
+    trades = [-0.01, -0.02, -0.03, 0.05]
+    result = evaluate("x", trades, n_candles=TRADING_DAYS_PER_YEAR)
+    losses = sum(1 for t in trades if t < 0)
+    assert result.max_losing_streak == losses

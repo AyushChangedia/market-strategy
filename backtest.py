@@ -51,6 +51,9 @@ class Result:
     # Annualised. A 40% total return means one thing over one year and
     # something much duller over five, and the table never said which.
     cagr_pct: float = 0.0
+    # The run of losses a trader would have had to sit through. Max drawdown
+    # says how deep the hole was; this says how long they were in it.
+    max_losing_streak: int = 0
 
 
 def load_prices(symbol: str, period: str) -> pd.DataFrame:
@@ -272,6 +275,30 @@ def trades_per_year(n_trades: int, n_candles: Optional[int]) -> float:
     return n_trades / years
 
 
+def max_losing_streak(trades) -> int:
+    """
+    The longest run of consecutive losing trades.
+
+    The figure that decides whether a strategy is survivable in practice
+    rather than on paper. Maximum drawdown says how deep the hole was; this
+    says how many losses in a row a person had to keep taking the next signal
+    through. Nine is the point at which most people stop following the rules,
+    whatever the backtest says happens afterwards.
+
+    A scratch trade breaks the run. It cost nothing, and a flat result is not
+    another loss to sit through.
+    """
+    longest = 0
+    current = 0
+    for trade in trades or []:
+        if trade < 0:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
 def cagr(total_return_pct: float, n_candles: Optional[int]) -> float:
     """
     The compound annual growth rate behind a total return.
@@ -327,7 +354,8 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
         return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
                       total_trades=0, scratch_trades=0, profit_factor=0.0,
                       sharpe_ratio=0.0, max_drawdown_pct=0.0,
-                      expectancy_pct=0.0, exposure_pct=held, cagr_pct=0.0)
+                      expectancy_pct=0.0, exposure_pct=held, cagr_pct=0.0,
+                      max_losing_streak=0)
 
     arr = np.array(trades)
     # A trade that came back exactly flat is neither a win nor a loss. Bundling
@@ -378,6 +406,7 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
         expectancy_pct=round(arr.mean() * 100, 2),
         exposure_pct=held,
         cagr_pct=cagr(total_return_pct, n_candles),
+        max_losing_streak=max_losing_streak(trades),
     )
 
 
