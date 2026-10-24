@@ -44,6 +44,10 @@ class Result:
     sharpe_ratio: float
     max_drawdown_pct: float
     expectancy_pct: float
+    # Share of the history actually spent holding something. A strategy in the
+    # market a tenth of the time earned its return with a tenth of the
+    # exposure, which the return alone does not say.
+    exposure_pct: float = 0.0
 
 
 def load_prices(symbol: str, period: str) -> pd.DataFrame:
@@ -265,7 +269,23 @@ def trades_per_year(n_trades: int, n_candles: Optional[int]) -> float:
     return n_trades / years
 
 
-def evaluate(name: str, trades: list, n_candles: Optional[int] = None) -> Result:
+def exposure(position: pd.Series) -> float:
+    """
+    The share of the history spent holding something, as a percentage.
+
+    The missing half of every return in this report. A strategy that returned
+    8% while in the market a tenth of the time and one that returned 8% while
+    always in it are not the same strategy — the first left nine tenths of the
+    period free and took a tenth of the risk to get there. Comparing them on
+    return alone silently prefers the one that was simply exposed for longer.
+    """
+    if position is None or len(position) == 0:
+        return 0.0
+    return round(float((position == 1).sum()) / len(position) * 100, 1)
+
+
+def evaluate(name: str, trades: list, n_candles: Optional[int] = None,
+             position: Optional[pd.Series] = None) -> Result:
     """
     Turn a list of trade returns into the metrics that matter.
 
@@ -273,11 +293,13 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None) -> Result
     turns a per-trade Sharpe into a per-year one; without it the ratio is
     reported unannualised rather than annualised by the wrong thing.
     """
+    held = 0.0 if position is None else exposure(position)
+
     if not trades:
         return Result(strategy=name, total_return_pct=0.0, win_rate_pct=0.0,
                       total_trades=0, scratch_trades=0, profit_factor=0.0,
                       sharpe_ratio=0.0, max_drawdown_pct=0.0,
-                      expectancy_pct=0.0)
+                      expectancy_pct=0.0, exposure_pct=held)
 
     arr = np.array(trades)
     # A trade that came back exactly flat is neither a win nor a loss. Bundling
@@ -324,6 +346,7 @@ def evaluate(name: str, trades: list, n_candles: Optional[int] = None) -> Result
         sharpe_ratio=round(sharpe, 2),
         max_drawdown_pct=round(max_dd, 2),
         expectancy_pct=round(arr.mean() * 100, 2),
+        exposure_pct=held,
     )
 
 
@@ -612,18 +635,22 @@ def main() -> None:
     results = []
     for key in chosen:
         label, signal_fn = STRATEGIES[key]
-        trades = extract_trades(df, signal_fn(df), fill=args.fill)
-        results.append((key, evaluate(label, trades, n_candles=len(df))))
+        position = signal_fn(df)
+        trades = extract_trades(df, position, fill=args.fill)
+        results.append((key, evaluate(label, trades, n_candles=len(df),
+                                      position=position)))
 
     results.sort(key=lambda pair: pair[1].total_return_pct, reverse=True)
 
-    header = f"{'Strategy':<34}{'Return':>9}{'Trades':>8}{'Win%':>8}{'PF':>7}{'MaxDD':>9}"
+    header = (f"{'Strategy':<34}{'Return':>9}{'Trades':>8}{'Win%':>8}"
+              f"{'PF':>7}{'MaxDD':>9}{'Held':>8}")
     print(header)
     print("-" * len(header))
     for _, r in results:
         pf = "—" if r.profit_factor is None else f"{r.profit_factor}"
         print(f"{r.strategy:<34}{r.total_return_pct:>8}%{r.total_trades:>8}"
-              f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%")
+              f"{r.win_rate_pct:>8}{pf:>7}{r.max_drawdown_pct:>8}%"
+              f"{r.exposure_pct:>7}%")
 
     beat = [r.strategy for _, r in results if r.total_return_pct > net_benchmark]
     print(f"\nBeat buy & hold: {', '.join(beat) if beat else 'none'}")

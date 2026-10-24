@@ -627,3 +627,55 @@ def test_the_walk_forward_report_is_still_strict_json():
     # numpy scalars and NaN both serialise in ways a strict parser rejects.
     report = backtest.walk_forward(_trending_frame(), "rsi")
     json.loads(json.dumps(report, allow_nan=False))
+
+
+# ---------------------------------------------------------------------------
+# Exposure
+# ---------------------------------------------------------------------------
+
+def test_exposure_is_the_share_of_bars_held():
+    assert backtest.exposure(pd.Series([0, 1, 1, 0])) == 50.0
+    assert backtest.exposure(pd.Series([1, 1, 1, 1])) == 100.0
+    assert backtest.exposure(pd.Series([0, 0, 0, 0])) == 0.0
+
+
+def test_exposure_of_nothing_is_nothing_rather_than_a_division_by_zero():
+    assert backtest.exposure(pd.Series([], dtype=float)) == 0.0
+    assert backtest.exposure(None) == 0.0
+
+
+def test_exposure_is_rounded_the_way_it_is_printed():
+    assert backtest.exposure(pd.Series([1, 0, 0])) == 33.3
+
+
+def test_two_strategies_with_the_same_return_are_not_the_same_strategy():
+    """
+    The missing half of every return in this report. One of these earned its
+    8% while holding a tenth of the time; the other was always in. Compared on
+    return alone the report silently prefers whichever was simply exposed for
+    longer.
+    """
+    rare = evaluate("rare", [0.08], position=pd.Series([1] + [0] * 9))
+    always = evaluate("always", [0.08], position=pd.Series([1] * 10))
+
+    assert rare.total_return_pct == always.total_return_pct
+    assert rare.exposure_pct == 10.0
+    assert always.exposure_pct == 100.0
+
+
+def test_exposure_is_reported_even_when_nothing_was_traded():
+    # A signal series that never fires still has an exposure, and it is zero.
+    result = evaluate("x", [], position=pd.Series([0, 0, 0]))
+    assert result.total_trades == 0
+    assert result.exposure_pct == 0.0
+
+
+def test_exposure_defaults_to_zero_when_no_position_is_given():
+    # evaluate is called from tests and from segment code without one; it
+    # must not invent a figure it was not told.
+    assert evaluate("x", [0.05]).exposure_pct == 0.0
+
+
+def test_exposure_is_on_the_serialised_result():
+    result = evaluate("x", [0.05], position=pd.Series([1, 1, 0, 0]))
+    assert json.loads(json.dumps(asdict(result), allow_nan=False))["exposure_pct"] == 50.0
